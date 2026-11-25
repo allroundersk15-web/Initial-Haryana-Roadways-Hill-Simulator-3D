@@ -1,15 +1,23 @@
 import * as THREE from 'three';
-import type { EndlessBiome } from '../types/simulator';
+import type { EndlessBiome, WeatherPreset } from '../types/simulator';
 import {
   buildCurvedMountainTunnel,
   buildDynamicDhabaComplex,
+  buildHighAltitudeClouds,
+  buildHillMarketTownComplex,
   buildIndianTrafficVehicle,
   buildPahadiMountainHouse,
   buildRoadLandslideZone,
+  buildSmallRoadsideMandir,
   createHighDetailAsphaltTexture,
+  makeLocalColliderOBB,
   updateDhabaComplex,
+  updateHillMarketTown,
   type DhabaComplexData,
+  type HighAltitudeCloudHandle,
+  type HillMarketTownData,
   type LandslideZoneData,
+  type StaticColliderOBB,
   type TrafficKind,
 } from './sceneryAndTraffic';
 
@@ -47,6 +55,9 @@ interface EndlessChunk {
   samples: EndlessSamplePoint[];
   landslide: LandslideZoneData | null;
   dhaba: DhabaComplexData | null;
+  market: HillMarketTownData | null;
+  clouds: HighAltitudeCloudHandle | null;
+  colliders: StaticColliderOBB[];
 }
 
 export interface EndlessWorldHandle {
@@ -58,6 +69,8 @@ export interface EndlessWorldHandle {
   startHeading: number;
   getLandslides: () => LandslideZoneData[];
   getDhabas: () => DhabaComplexData[];
+  getMarkets: () => HillMarketTownData[];
+  getColliders: () => StaticColliderOBB[];
   sampleRoadAt: (pos: THREE.Vector3) => {
     sMeters: number;
     point: THREE.Vector3;
@@ -76,7 +89,9 @@ export interface EndlessWorldHandle {
     busSpeedMs: number,
     hornBlowing: boolean,
     isRaining: boolean,
-    nightFactor?: number
+    nightFactor?: number,
+    timeOfDayHours?: number,
+    weather?: WeatherPreset
   ) => void;
   dispose: () => void;
 }
@@ -248,11 +263,16 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     const rightIdx: number[] = [];
 
     const leftVec = new THREE.Vector3();
+    const chunkColliders: StaticColliderOBB[] = [];
     const hasMountainTunnel = biome === 'mountain' && idx > 0 && idx % 3 === 1;
     const tunnelTStart = 0.42;
     const tunnelTEnd = 0.62;
-    const hasDhaba = !hasMountainTunnel && (idx === 0 || idx % 2 === 1);
-    const dhabaT = 0.62;
+    // Guaranteed early Dhaba right ahead on chunk 0 (t=0.34, ~160m from spawn!) & every even chunk
+    const hasDhaba = !hasMountainTunnel && (idx === 0 || idx % 2 === 0);
+    const dhabaT = idx === 0 ? 0.34 : 0.52;
+    // Clustered Hill Market Town (houses + shops + school) on odd non-tunnel chunks & chunk 0 upper end!
+    const hasMarket = !hasMountainTunnel && biome !== 'plains' && (idx === 0 || idx % 2 === 1);
+    const marketT = idx === 0 ? 0.80 : 0.56;
 
     for (let i = 0; i <= segs; i++) {
       const t = i / segs;
@@ -292,15 +312,17 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
 
       const inTunnel = hasMountainTunnel && t >= tunnelTStart - 0.02 && t <= tunnelTEnd + 0.02;
       const nearDhaba = hasDhaba && Math.abs(t - dhabaT) < 0.14;
-      const lShoulderOut = nearDhaba ? 24.5 : inTunnel ? 8.5 : 4.2;
-      const lMidOut = nearDhaba ? 40 : 24;
+      const nearMarket = hasMarket && Math.abs(t - marketT) < 0.15;
+      const nearWide = nearDhaba || nearMarket;
+      const lShoulderOut = nearWide ? 25.5 : inTunnel ? 8.5 : 4.2;
+      const lMidOut = nearWide ? 42 : 24;
 
       const c0 = p.clone().addScaledVector(leftVec, halfW + 0.1);
       const c1 = p.clone().addScaledVector(leftVec, halfW + lShoulderOut);
       const c2 = p
         .clone()
         .addScaledVector(leftVec, halfW + lMidOut)
-        .add(new THREE.Vector3(0, (inTunnel ? 8 : nearDhaba ? Math.min(lMidY, 10) : lMidY) + Math.sin(t * 14 + seed) * (biome === 'plains' ? 0.3 : 3.2), 0));
+        .add(new THREE.Vector3(0, (inTunnel ? 8 : nearWide ? Math.min(lMidY, 10) : lMidY) + Math.sin(t * 14 + seed) * (biome === 'plains' ? 0.3 : 3.2), 0));
       const c3 = p
         .clone()
         .addScaledVector(leftVec, halfW + 92)
@@ -442,7 +464,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const tan = curve.getTangentAt(t).normalize();
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const rightSide = i % 2 === 0;
-      if (!rightSide && hasDhaba && Math.abs(t - dhabaT) < 0.14) continue;
+      if (!rightSide && ((hasDhaba && Math.abs(t - dhabaT) < 0.14) || (hasMarket && Math.abs(t - marketT) < 0.15))) continue;
       const off = 1.2 + ((i * 19) % 70) * 0.15;
       const distOut = rightSide ? halfW + off : -(halfW + off);
       const yOff =
@@ -486,7 +508,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const tan = curve.getTangentAt(t).normalize();
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const rightSide = i % 2 === 0;
-      if (!rightSide && hasDhaba && Math.abs(t - dhabaT) < 0.15) continue;
+      if (!rightSide && ((hasDhaba && Math.abs(t - dhabaT) < 0.15) || (hasMarket && Math.abs(t - marketT) < 0.16))) continue;
       const off = 9.5 + (i % 7) * 5.2;
       const distOut = rightSide ? halfW + off : -(halfW + off);
       const yOff =
@@ -518,7 +540,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     group.add(trunkInst);
     group.add(crownInst);
 
-    // Mountain Pahadi Houses or Haryana Plains Cottages along the roadside
+    // Mountain Pahadi Houses or Haryana Plains Cottages along the roadside (with solid colliders!)
     for (let h = 0; h < 3; h++) {
       const t = 0.18 + h * 0.31;
       if (hasMountainTunnel && t >= tunnelTStart - 0.05 && t <= tunnelTEnd + 0.05) continue;
@@ -527,7 +549,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const left = right.clone().negate();
       const onLeft = (idx + h) % 2 === 0;
-      if (onLeft && hasDhaba && Math.abs(t - dhabaT) < 0.16) continue;
+      if (onLeft && ((hasDhaba && Math.abs(t - dhabaT) < 0.16) || (hasMarket && Math.abs(t - marketT) < 0.17))) continue;
       const house = biome === 'plains' ? buildPlainsVillageHouse(idx * 7 + h) : buildPahadiMountainHouse(idx * 11 + h);
       const distOut = halfW + 13.5 + (h % 2) * 4.5;
       house.position.copy(p).addScaledVector(onLeft ? left : right, distOut);
@@ -538,11 +560,68 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       }
       house.lookAt(p.clone().addScaledVector(onLeft ? right : left, 8));
       group.add(house);
+      chunkColliders.push(
+        makeLocalColliderOBB(
+          p,
+          tan,
+          right,
+          onLeft ? distOut : -distOut,
+          0,
+          3.6,
+          3.2,
+          `endless-house-${idx}-${h}`,
+          'Roadside House',
+          'house'
+        )
+      );
+    }
+
+    // Small Roadside Pahadi Mandirs in mountain & foothill chunks!
+    if (biome !== 'plains') {
+      const shrineTs = [0.16, 0.68];
+      shrineTs.forEach((st, sIdx) => {
+        if (hasMountainTunnel && st >= tunnelTStart - 0.05 && st <= tunnelTEnd + 0.05) return;
+        if (hasDhaba && Math.abs(st - dhabaT) < 0.15) return;
+        if (hasMarket && Math.abs(st - marketT) < 0.16) return;
+        const sp = curve.getPointAt(st);
+        const stan = curve.getTangentAt(st).normalize();
+        const sright = new THREE.Vector3().crossVectors(stan, upVec).normalize();
+        const shrine = buildSmallRoadsideMandir(
+          `endless-mandir-${idx}-${sIdx}`,
+          sp,
+          stan,
+          sright,
+          true,
+          halfW + 3.05
+        );
+        group.add(shrine.group);
+        chunkColliders.push(shrine.collider);
+      });
+    }
+
+    // High-Altitude 3D Clouds in mountain biome chunks!
+    let clouds: HighAltitudeCloudHandle | null = null;
+    if (biome === 'mountain') {
+      const cloudAnchors: Array<{ pos: THREE.Vector3; right: THREE.Vector3; lowValley?: boolean; scale?: number }> = [];
+      for (let c = 0; c < 10; c++) {
+        const ct = 0.08 + (c / 9) * 0.84;
+        const cp = curve.getPointAt(ct);
+        const ctan = curve.getTangentAt(ct).normalize();
+        const cright = new THREE.Vector3().crossVectors(ctan, upVec).normalize();
+        cloudAnchors.push({
+          pos: cp,
+          right: cright,
+          lowValley: c % 3 === 0,
+          scale: c % 3 === 0 ? 1.1 : 1.4,
+        });
+      }
+      clouds = buildHighAltitudeClouds(cloudAnchors, idx * 11 + 3);
+      group.add(clouds.group);
     }
 
     // Occasional curved hollow mountain tunnel in mountain chunks (ZERO tolls in Endless Mode!)
     if (hasMountainTunnel) {
-      const tunnel = buildCurvedMountainTunnel(
+      const builtTunnel = buildCurvedMountainTunnel(
         curve,
         tunnelTStart,
         tunnelTEnd,
@@ -550,7 +629,8 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
         `HIMALAYAN PASS TUNNEL #${idx}`,
         maxAniso
       );
-      group.add(tunnel);
+      group.add(builtTunnel.group);
+      chunkColliders.push(...builtTunnel.colliders);
     }
 
     // Lively Indian Highway Dhaba Stop with Bus Parking Bay + Arriving/Departing Cars, Bikes & Buses!
@@ -575,28 +655,70 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
         maxAniso
       );
       group.add(dhaba.group);
+      chunkColliders.push(...dhaba.colliders);
     }
 
-    // Random Half-Road Mountain / Foothill Landslide (~45% of non-tunnel hill chunks, avoiding Dhaba zone)
-    let landslide: LandslideZoneData | null = null;
-    if (biome !== 'plains' && !hasMountainTunnel && idx > 0 && Math.random() < 0.48) {
-      const lsT = hasDhaba ? 0.24 + Math.random() * 0.14 : 0.32 + Math.random() * 0.36;
-      const lsPos = curve.getPointAt(lsT);
-      const lsTan = curve.getTangentAt(lsT).normalize();
-      const builtLs = buildRoadLandslideZone(
-        `endless-ls-${idx}`,
-        biome === 'mountain' ? 'Himalayan Rockfall Slide' : 'Shivalik Hill Landslide',
-        lsPos,
-        lsTan,
+    // Clustered Pahadi Hill Market Town (Homes + Shops + Govt. Hill School together!)
+    let market: HillMarketTownData | null = null;
+    if (hasMarket) {
+      const marketNames: Array<[string, string]> = [
+        ['SOLAN RIDGE BAZAAR & SCHOOL', 'सोलन पहाड़ी बाजार व पाठशाला'],
+        ['DHARAMSHALA HILL MARKET', 'धर्मशाला कोतवाली बाजार'],
+        ['KULLU VALLEY BAZAAR', 'कुल्लू वैली मुख्य बाजार'],
+        ['NARKANDA TOWN MARKET', 'नारकंडा कस्बा व स्कूल'],
+      ];
+      const [mTitle, mHindi] = marketNames[idx % marketNames.length];
+      const mPos = curve.getPointAt(marketT);
+      const mTan = curve.getTangentAt(marketT).normalize();
+      market = buildHillMarketTownComplex(
+        `endless-market-${idx}`,
+        mTitle,
+        mHindi,
+        mPos,
+        mTan,
         roadWidth,
         maxAniso
       );
-      group.add(builtLs.group);
-      landslide = builtLs.data;
+      group.add(market.group);
+      chunkColliders.push(...market.colliders);
+    }
+
+    // Random Half-Road Mountain / Foothill Landslide (~45% of non-tunnel hill chunks, avoiding Dhaba & Market zones)
+    let landslide: LandslideZoneData | null = null;
+    if (biome !== 'plains' && !hasMountainTunnel && idx > 0 && Math.random() < 0.48) {
+      const lsT = hasDhaba || hasMarket ? 0.22 + Math.random() * 0.1 : 0.32 + Math.random() * 0.36;
+      const lsBlocked =
+        (hasDhaba && Math.abs(lsT - dhabaT) < 0.15) || (hasMarket && Math.abs(lsT - marketT) < 0.16);
+      if (!lsBlocked) {
+        const lsPos = curve.getPointAt(lsT);
+        const lsTan = curve.getTangentAt(lsT).normalize();
+        const builtLs = buildRoadLandslideZone(
+          `endless-ls-${idx}`,
+          biome === 'mountain' ? 'Himalayan Rockfall Slide' : 'Shivalik Hill Landslide',
+          lsPos,
+          lsTan,
+          roadWidth,
+          maxAniso
+        );
+        group.add(builtLs.group);
+        landslide = builtLs.data;
+      }
     }
 
     root.add(group);
-    return { index: idx, biome, startS, endS, group, samples, landslide, dhaba };
+    return {
+      index: idx,
+      biome,
+      startS,
+      endS,
+      group,
+      samples,
+      landslide,
+      dhaba,
+      market,
+      clouds,
+      colliders: chunkColliders,
+    };
   };
 
   // Bootstrap initial 4 seamless highway chunks (~2,100m ahead)
@@ -737,6 +859,22 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     return list;
   }
 
+  function getMarkets(): HillMarketTownData[] {
+    const list: HillMarketTownData[] = [];
+    for (const ch of chunks) {
+      if (ch.market) list.push(ch.market);
+    }
+    return list;
+  }
+
+  function getColliders(): StaticColliderOBB[] {
+    const list: StaticColliderOBB[] = [];
+    for (const ch of chunks) {
+      for (const c of ch.colliders) list.push(c);
+    }
+    return list;
+  }
+
   function updateWorld(
     dt: number,
     elapsed: number,
@@ -745,7 +883,9 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     _busSpeedMs: number,
     hornBlowing: boolean,
     isRaining: boolean,
-    nightFactor = 0
+    nightFactor = 0,
+    timeOfDayHours = 9.5,
+    weather: WeatherPreset = 'sunny'
   ) {
     // Stream new chunks ahead and recycle far-behind chunks seamlessly
     const lastChunk = chunks[chunks.length - 1];
@@ -758,10 +898,16 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       disposeObject(old.group);
     }
 
-    // Animate roadside Dhaba stops (arriving/parking/departing bikes, cars & buses + crowd + night lights)
+    // Animate roadside Dhaba stops, Hill Market Towns & High-Altitude Mountain Clouds
     for (const ch of chunks) {
       if (ch.dhaba) {
         updateDhabaComplex(ch.dhaba, dt, elapsed, nightFactor);
+      }
+      if (ch.market) {
+        updateHillMarketTown(ch.market, dt, elapsed, nightFactor);
+      }
+      if (ch.clouds) {
+        ch.clouds.updateClouds(dt, elapsed, timeOfDayHours, weather);
       }
     }
 
@@ -931,6 +1077,8 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     startHeading,
     getLandslides,
     getDhabas,
+    getMarkets,
+    getColliders,
     sampleRoadAt,
     updateWorld,
     dispose,

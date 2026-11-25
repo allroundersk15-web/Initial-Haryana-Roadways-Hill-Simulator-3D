@@ -1,17 +1,24 @@
 import * as THREE from 'three';
-import type { CareerRouteSpec, LandmarkType, RouteStopSpec } from '../types/simulator';
+import type { CareerRouteSpec, LandmarkType, RouteStopSpec, WeatherPreset } from '../types/simulator';
 import {
   buildCurvedMountainTunnel,
   buildDynamicDhabaComplex,
+  buildHighAltitudeClouds,
+  buildHillMarketTownComplex,
   buildIndianTrafficVehicle,
   buildNhaiTollPlaza,
   buildPahadiMountainHouse,
   buildRoadLandslideZone,
+  buildSmallRoadsideMandir,
   createHighDetailAsphaltTexture,
   createSignboardTexture,
+  makeLocalColliderOBB,
   updateDhabaComplex,
+  updateHillMarketTown,
   type DhabaComplexData,
+  type HillMarketTownData,
   type LandslideZoneData,
+  type StaticColliderOBB,
   type TollPlazaData,
   type TrafficKind,
 } from './sceneryAndTraffic';
@@ -62,6 +69,8 @@ export interface HimachalWorldHandle {
   tolls: TollPlazaData[];
   landslides: LandslideZoneData[];
   dhabas: DhabaComplexData[];
+  markets: HillMarketTownData[];
+  colliders: StaticColliderOBB[];
   passengers: PassengerActor[];
   traffic: TrafficVehicle[];
   rainSystem: THREE.Points;
@@ -83,7 +92,9 @@ export interface HimachalWorldHandle {
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
     isRaining: boolean,
-    nightFactor?: number
+    nightFactor?: number,
+    timeOfDayHours?: number,
+    weather?: WeatherPreset
   ) => void;
   dispose: () => void;
 }
@@ -390,25 +401,50 @@ export function buildHimachalMountainWorld(
   const root = new THREE.Group();
   const roadWidth = 11.2; // Generous two-lane Indian NH highway for comfortable passing
 
-  // Tunnel & Toll reserved spline intervals (kept gently curved & graded for clean geometry)
+  // Tunnel, Toll, Extra Roadside Dhaba & Hill Market Town reserved spline intervals (zero overlap!)
   const tunnelRanges: Array<{ start: number; end: number; name: string }> = [
     { start: 0.36, end: 0.405, name: `${route.origin.toUpperCase()} ROCK TUNNEL` },
-    { start: 0.68, end: 0.725, name: `${route.destination.toUpperCase()} PASS TUNNEL` },
+    { start: 0.625, end: 0.67, name: `${route.destination.toUpperCase()} PASS TUNNEL` },
   ];
   const tollSpecs = [
     {
       id: `${route.id}-toll-1`,
-      t: 0.24,
+      t: 0.175,
       name: 'SANWARA NHAI TOLL',
       feeInr: 450,
     },
     {
       id: `${route.id}-toll-2`,
-      t: 0.79,
+      t: 0.815,
       name: `${route.destination.split(' ')[0].toUpperCase()} GHAT TOLL`,
       feeInr: route.splineSeed % 2 === 0 ? 500 : 400,
     },
   ];
+  // Guaranteed early roadside Dhaba (~380m from depot start) + mid-route Dhaba so players ALWAYS see lively Dhabas!
+  const extraDhabaSpecs = [
+    {
+      id: `${route.id}-early-dhaba`,
+      t: 0.105,
+      title: 'SHARMA PAHADI HIGHWAY DHABA',
+      hindiName: 'शर्मा पहाड़ी ढाबा · चाय व परांठा',
+    },
+    {
+      id: `${route.id}-high-dhaba`,
+      t: 0.575,
+      title: 'HIMACHAL VAISHNO DHABA',
+      hindiName: 'हिमाचल वैष्णो ढाबा · राजमा चावल',
+    },
+  ];
+  // Extra clustered Himalayan Hill Market Village (homes + shops + school) alongside route market stops
+  const extraMarketSpecs = [
+    {
+      id: `${route.id}-hill-bazaar`,
+      t: 0.315,
+      title: 'SHIVALIK HILL MARKET & SCHOOL',
+      hindiName: 'शिवालिक पहाड़ी बाजार व पाठशाला',
+    },
+  ];
+  const colliders: StaticColliderOBB[] = [];
 
   // 1. Construct longer, sweeping 3D Himalayan mountain spline (~4,200m real-scale drive!)
   const controlPoints: THREE.Vector3[] = [];
@@ -425,9 +461,12 @@ export function buildHimachalMountainWorld(
     const frac = i / (numCtrl - 1);
     controlPoints.push(new THREE.Vector3(curX, curY, curZ));
 
-    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - frac) < 0.032);
-    const nearTunnel = tunnelRanges.some((tn) => frac >= tn.start - 0.025 && frac <= tn.end + 0.025);
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - frac) < 0.036);
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - frac) < 0.03);
+    const nearTunnel = tunnelRanges.some((tn) => frac >= tn.start - 0.022 && frac <= tn.end + 0.022);
+    const nearStop =
+      route.stops.some((s) => Math.abs(s.progressT - frac) < 0.032) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - frac) < 0.026) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - frac) < 0.03);
 
     let turn = 0;
     if (i > 1 && i < numCtrl - 3) {
@@ -503,17 +542,22 @@ export function buildHimachalMountainWorld(
     roadUvs.push(0, t, 1, t);
 
     const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.032);
-    const nearDhaba = route.stops.some(
-      (s) => s.landmarkType === 'dhaba' && Math.abs(s.progressT - t) < 0.044
-    );
+    const nearDhabaOrMarket =
+      route.stops.some(
+        (s) =>
+          (s.landmarkType === 'dhaba' || s.landmarkType === 'market') &&
+          Math.abs(s.progressT - t) < 0.044
+      ) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - t) < 0.038) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - t) < 0.044);
     const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.025);
     const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.008 && t <= tn.end + 0.008);
 
     // Uphill terraced mountain cliff on LEFT side (+leftVec)
-    // Flatten generously near Dhabas (for full bus parking yard), stops & tolls!
-    const shoulderW = nearDhaba ? 24.5 : nearStop || nearToll ? 16.5 : inTunnel ? 8.5 : 4.2;
-    const midOut = nearDhaba ? 38 : nearStop || nearToll ? 30 : inTunnel ? 24 : 21;
-    const midLift = nearDhaba ? 12 : nearStop || nearToll ? 14 : inTunnel ? 9 : 22 + Math.sin(t * 68) * 5;
+    // Flatten generously near Dhabas, Hill Markets (shops+school+homes), stops & tolls!
+    const shoulderW = nearDhabaOrMarket ? 25.5 : nearStop || nearToll ? 16.5 : inTunnel ? 8.5 : 4.2;
+    const midOut = nearDhabaOrMarket ? 42 : nearStop || nearToll ? 30 : inTunnel ? 24 : 21;
+    const midLift = nearDhabaOrMarket ? 11 : nearStop || nearToll ? 14 : inTunnel ? 9 : 22 + Math.sin(t * 68) * 5;
     const peakLift = inTunnel ? 28 : 58 + Math.cos(t * 36 + seed) * 16;
 
     const c0 = p.clone().addScaledVector(leftVec, halfW + 0.1);
@@ -717,7 +761,10 @@ export function buildHimachalMountainWorld(
     const tan = curve.getTangentAt(t).normalize();
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
     const valleySide = i % 2 === 0;
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.032);
+    const nearStop =
+      route.stops.some((s) => Math.abs(s.progressT - t) < 0.038) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - t) < 0.034) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - t) < 0.04);
     if (!valleySide && nearStop) continue;
 
     const offsetFromEdge = 1.15 + ((i * 17) % 100) * 0.14;
@@ -772,7 +819,10 @@ export function buildHimachalMountainWorld(
     const tan = curve.getTangentAt(t).normalize();
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
 
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.036);
+    const nearStop =
+      route.stops.some((s) => Math.abs(s.progressT - t) < 0.04) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - t) < 0.036) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - t) < 0.042);
     const valleySide = i % 2 === 0 || nearStop;
     const distOut = valleySide ? halfW + 9 + (i % 7) * 5.2 : -(halfW + 11.5 + (i % 6) * 5.0);
     const yOffset = valleySide ? -(distOut - halfW) * 0.56 : (Math.abs(distOut) - halfW) * 0.72;
@@ -804,7 +854,10 @@ export function buildHimachalMountainWorld(
   // 7. Authentic Pahadi Mountain Houses perched on safe Himalayan terraces along the route
   for (let h = 0; h < 18; h++) {
     const t = 0.07 + (h / 18) * 0.87;
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.042);
+    const nearStop =
+      route.stops.some((s) => Math.abs(s.progressT - t) < 0.044) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - t) < 0.04) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - t) < 0.045);
     const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.02 && t <= tn.end + 0.02);
     const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.025);
     if (nearStop || inTunnel || nearToll) continue;
@@ -821,18 +874,66 @@ export function buildHimachalMountainWorld(
       house.position.copy(p).addScaledVector(left, distOut);
       house.position.y += (distOut - halfW - 3.5) * 0.65;
       house.lookAt(p.clone().addScaledVector(right, 8));
+      colliders.push(
+        makeLocalColliderOBB(p, tan, right, distOut, 0, 3.6, 3.2, `pahadi-house-${h}`, 'Pahadi House', 'house')
+      );
     } else {
       const distOut = halfW + 13.0 + (h % 2) * 5.0;
       house.position.copy(p).addScaledVector(right, distOut);
       house.position.y -= (distOut - halfW - 2.5) * 0.45;
       house.lookAt(p.clone().addScaledVector(left, 8));
+      colliders.push(
+        makeLocalColliderOBB(p, tan, right, -distOut, 0, 3.6, 3.2, `pahadi-house-${h}`, 'Pahadi House', 'house')
+      );
     }
     root.add(house);
   }
 
-  // 8. Proper Curved Spline-Extruded Hollow Mountain Tunnels (NEVER clip into the road!)
+  // 7b. Small Roadside Pahadi Mandirs (छोटे रोडसाइड मंदिर) scattered along scenic mountain bends!
+  const smallMandirTs = [0.068, 0.215, 0.435, 0.545, 0.70, 0.875];
+  smallMandirTs.forEach((mt, mIdx) => {
+    const blocked =
+      route.stops.some((s) => Math.abs(s.progressT - mt) < 0.036) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - mt) < 0.034) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - mt) < 0.04) ||
+      tunnelRanges.some((tn) => mt >= tn.start - 0.02 && mt <= tn.end + 0.02) ||
+      tollSpecs.some((tl) => Math.abs(tl.t - mt) < 0.028);
+    if (blocked) return;
+    const mp = curve.getPointAt(mt);
+    const mtan = curve.getTangentAt(mt).normalize();
+    const mright = new THREE.Vector3().crossVectors(mtan, upVec).normalize();
+    const shrine = buildSmallRoadsideMandir(
+      `${route.id}-small-mandir-${mIdx}`,
+      mp,
+      mtan,
+      mright,
+      true,
+      halfW + 3.05
+    );
+    root.add(shrine.group);
+    colliders.push(shrine.collider);
+  });
+
+  // 7c. High-Altitude 3D Himalayan Clouds drifting across elevated mountain peaks & roadside valleys!
+  const cloudAnchors: Array<{ pos: THREE.Vector3; right: THREE.Vector3; lowValley?: boolean; scale?: number }> = [];
+  for (let c = 0; c < 28; c++) {
+    const ct = 0.36 + (c / 27) * 0.62;
+    const cp = curve.getPointAt(ct);
+    const ctan = curve.getTangentAt(ct).normalize();
+    const cright = new THREE.Vector3().crossVectors(ctan, upVec).normalize();
+    cloudAnchors.push({
+      pos: cp,
+      right: cright,
+      lowValley: c % 3 === 0,
+      scale: c % 3 === 0 ? 1.15 : 1.45,
+    });
+  }
+  const highAltitudeClouds = buildHighAltitudeClouds(cloudAnchors, Math.round(seed * 10));
+  root.add(highAltitudeClouds.group);
+
+  // 8. Proper Curved Spline-Extruded Hollow Mountain Tunnels (NEVER clip into the road + solid portal piers!)
   for (const tn of tunnelRanges) {
-    const tunnelMesh = buildCurvedMountainTunnel(
+    const builtTunnel = buildCurvedMountainTunnel(
       curve,
       tn.start,
       tn.end,
@@ -840,10 +941,11 @@ export function buildHimachalMountainWorld(
       tn.name,
       maxAniso
     );
-    root.add(tunnelMesh);
+    root.add(builtTunnel.group);
+    colliders.push(...builtTunnel.colliders);
   }
 
-  // 9. NHAI FASTag Toll Plazas (Career Mode ONLY — deduct ₹400–₹500 per pass!)
+  // 9. NHAI FASTag Toll Plazas (Career Mode ONLY — deduct ₹400–₹500 per pass + solid booth & barrier colliders!)
   const tolls: TollPlazaData[] = [];
   for (const tl of tollSpecs) {
     const pt = curve.getPointAt(tl.t);
@@ -851,6 +953,7 @@ export function buildHimachalMountainWorld(
     const built = buildNhaiTollPlaza(tl.id, tl.name, tl.feeInr, tl.t, pt, tan, roadWidth, maxAniso);
     root.add(built.group);
     tolls.push(built.data);
+    colliders.push(...built.data.colliders);
   }
 
   // 9b. Random Himalayan Half-Road Landslides (2 zones per route avoiding stops, tunnels, and tolls)
@@ -868,6 +971,8 @@ export function buildHimachalMountainWorld(
     // Ensure clear separation from stops, tunnels, and toll plazas
     const isBlocked = (tVal: number) =>
       route.stops.some((s) => Math.abs(s.progressT - tVal) < 0.048) ||
+      extraDhabaSpecs.some((d) => Math.abs(d.t - tVal) < 0.042) ||
+      extraMarketSpecs.some((m) => Math.abs(m.t - tVal) < 0.048) ||
       tunnelRanges.some((tn) => tVal >= tn.start - 0.03 && tVal <= tn.end + 0.03) ||
       tollSpecs.some((tl) => Math.abs(tl.t - tVal) < 0.04);
     for (let tries = 0; tries < 8 && isBlocked(chosenT); tries++) {
@@ -889,10 +994,47 @@ export function buildHimachalMountainWorld(
     }
   }
 
-  // 10. Route Landmarks (Bus Stands, Dynamic Dhabas with Bus Parking & Traffic, Markets, Mandirs) + Waiting Crowds
+  // 10. Route Landmarks (Bus Stands, Dynamic Dhabas with Bus Parking & Traffic, Hill Market Towns with Houses+Shops+School, Mandirs) + Waiting Crowds
   const stops: StopZoneData[] = [];
   const dhabas: DhabaComplexData[] = [];
+  const markets: HillMarketTownData[] = [];
   const passengers: PassengerActor[] = [];
+
+  // Spawn guaranteed early & mid-route roadside Dhabas so drivers ALWAYS encounter Dhabas right away!
+  for (const exDh of extraDhabaSpecs) {
+    const pt = curve.getPointAt(exDh.t);
+    const tan = curve.getTangentAt(exDh.t).normalize();
+    const dhData = buildDynamicDhabaComplex(
+      exDh.id,
+      exDh.title,
+      exDh.hindiName,
+      pt,
+      tan,
+      roadWidth,
+      maxAniso
+    );
+    root.add(dhData.group);
+    dhabas.push(dhData);
+    colliders.push(...dhData.colliders);
+  }
+
+  // Spawn extra roadside Hill Market Village (houses + shops + school clustered together!)
+  for (const exMk of extraMarketSpecs) {
+    const pt = curve.getPointAt(exMk.t);
+    const tan = curve.getTangentAt(exMk.t).normalize();
+    const mkData = buildHillMarketTownComplex(
+      exMk.id,
+      exMk.title,
+      exMk.hindiName,
+      pt,
+      tan,
+      roadWidth,
+      maxAniso
+    );
+    root.add(mkData.group);
+    markets.push(mkData);
+    colliders.push(...mkData.colliders);
+  }
 
   route.stops.forEach((stop, stopIdx) => {
     const pt = curve.getPointAt(stop.progressT);
@@ -915,13 +1057,43 @@ export function buildHimachalMountainWorld(
       );
       root.add(dhabaData.group);
       dhabas.push(dhabaData);
+      colliders.push(...dhabaData.colliders);
       bayCenter = dhabaData.busBayWorldPos.clone();
+    } else if (stop.landmarkType === 'market') {
+      // Full clustered Himachali Hill Market Town with shops, terraced Pahadi houses & Government Hill School!
+      const marketData = buildHillMarketTownComplex(
+        stop.id,
+        stop.signageTitle,
+        stop.hindiName,
+        pt,
+        tan,
+        roadWidth,
+        maxAniso
+      );
+      root.add(marketData.group);
+      markets.push(marketData);
+      colliders.push(...marketData.colliders);
     } else {
       const landmarkMesh = buildLandmarkStructure(stop.landmarkType, stop, maxAniso);
       const structOffset = stop.landmarkType === 'mandir' ? halfW + 9.2 : halfW + 6.4;
       landmarkMesh.position.copy(pt).addScaledVector(left, structOffset);
       landmarkMesh.lookAt(pt.clone().addScaledVector(right, 8));
       root.add(landmarkMesh);
+      // Register solid OBB collider for Bus Stands and Major Mandirs
+      colliders.push(
+        makeLocalColliderOBB(
+          pt,
+          tan,
+          right,
+          structOffset,
+          0,
+          stop.landmarkType === 'mandir' ? 4.8 : 2.8,
+          stop.landmarkType === 'mandir' ? 5.6 : 8.2,
+          `${stop.id}-landmark`,
+          stop.name,
+          stop.landmarkType === 'mandir' ? 'mandir' : 'building'
+        )
+      );
     }
 
     const bayMesh = new THREE.Mesh(
@@ -1110,12 +1282,22 @@ export function buildHimachalMountainWorld(
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
     isRaining: boolean,
-    nightFactor = 0
+    nightFactor = 0,
+    timeOfDayHours = 9.5,
+    weather: WeatherPreset = 'sunny'
   ) {
     // Animate Dhaba arriving/parking/departing cars, bikes & buses + crowd + night lights
     for (const dh of dhabas) {
       updateDhabaComplex(dh, dt, elapsed, nightFactor);
     }
+
+    // Animate clustered Hill Market Towns (shoppers, students & warm night lights)
+    for (const mk of markets) {
+      updateHillMarketTown(mk, dt, elapsed, nightFactor);
+    }
+
+    // Animate drifting High-Altitude Himalayan Clouds with Day-Night sky tinting
+    highAltitudeClouds.updateClouds(dt, elapsed, timeOfDayHours, weather);
 
     // Animate stop beacons
     for (const s of stops) {
@@ -1338,6 +1520,8 @@ export function buildHimachalMountainWorld(
     tolls,
     landslides,
     dhabas,
+    markets,
+    colliders,
     passengers,
     traffic,
     rainSystem,

@@ -19,7 +19,14 @@ import type {
 } from '../types/simulator';
 import { buildHaryanaRoadwaysBus, type BusVisualRig, type ConductorMode } from './busBuilder';
 import { buildEndlessMountainWorld, type EndlessWorldHandle } from './endlessWorldBuilder';
-import { createSkyGradientDome, type DhabaComplexData, type LandslideZoneData } from './sceneryAndTraffic';
+import {
+  createSkyGradientDome,
+  type DhabaComplexData,
+  type HillMarketTownData,
+  type LandslideZoneData,
+  type StaticColliderCategory,
+  type StaticColliderOBB,
+} from './sceneryAndTraffic';
 import { buildTrainingGroundArena, type TrainingArenaHandle } from './trainingBuilder';
 import { buildHimachalMountainWorld, type HimachalWorldHandle } from './worldBuilder';
 
@@ -93,6 +100,88 @@ const _dayBgColor = new THREE.Color();
 const _dayFogColor = new THREE.Color();
 const _dayHemiSky = new THREE.Color();
 const _dayHemiGround = new THREE.Color();
+const _tmpObjPos = new THREE.Vector3();
+const _tmpObjQuat = new THREE.Quaternion();
+const _tmpObjFwd = new THREE.Vector3();
+const _tmpObjRight = new THREE.Vector3();
+
+const BUS_HALF_W = 1.28;
+const BUS_HALF_L = 5.45;
+const BUS_CORNERS: ReadonlyArray<[number, number]> = [
+  [-BUS_HALF_W, BUS_HALF_L],
+  [BUS_HALF_W, BUS_HALF_L],
+  [-BUS_HALF_W, -BUS_HALF_L],
+  [BUS_HALF_W, -BUS_HALF_L],
+];
+
+interface ObbHit {
+  mtvX: number;
+  mtvZ: number;
+  pen: number;
+}
+
+/** Exact 2D Separating Axis Theorem (SAT) OBB-vs-OBB overlap test on the XZ plane. */
+function computeObbCollision(
+  busX: number,
+  busZ: number,
+  busFx: number,
+  busFz: number,
+  busRx: number,
+  busRz: number,
+  obsCx: number,
+  obsCz: number,
+  obsFx: number,
+  obsFz: number,
+  obsRx: number,
+  obsRz: number,
+  obsHalfW: number,
+  obsHalfL: number
+): ObbHit | null {
+  const dx = busX - obsCx;
+  const dz = busZ - obsCz;
+
+  let minOverlap = Infinity;
+  let mtvX = 0;
+  let mtvZ = 0;
+
+  // Test all 4 separating axes: bus right, bus forward, obstacle right, obstacle forward
+  for (let i = 0; i < 4; i++) {
+    let ax: number;
+    let az: number;
+    if (i === 0) {
+      ax = busRx;
+      az = busRz;
+    } else if (i === 1) {
+      ax = busFx;
+      az = busFz;
+    } else if (i === 2) {
+      ax = obsRx;
+      az = obsRz;
+    } else {
+      ax = obsFx;
+      az = obsFz;
+    }
+
+    const dist = dx * ax + dz * az;
+    const projBus =
+      Math.abs(busRx * ax + busRz * az) * BUS_HALF_W +
+      Math.abs(busFx * ax + busFz * az) * BUS_HALF_L;
+    const projObs =
+      Math.abs(obsRx * ax + obsRz * az) * obsHalfW +
+      Math.abs(obsFx * ax + obsFz * az) * obsHalfL;
+    const overlap = projBus + projObs - Math.abs(dist);
+    if (overlap <= 0) return null;
+
+    if (overlap < minOverlap) {
+      minOverlap = overlap;
+      const sign = dist >= 0 ? 1 : -1;
+      mtvX = ax * sign;
+      mtvZ = az * sign;
+    }
+  }
+
+  return { mtvX, mtvZ, pen: minOverlap };
+}
 
 function formatTimeOfDayLabel(hours: number): string {
   const hNorm = ((hours % 24) + 24) % 24;
@@ -298,9 +387,10 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     slopePct: 0,
     endlessBiome: null as EndlessBiome | null,
     collisionCooldown: 0,
-    // 360-degree finger/mouse free-look offsets (radians)
+    // 360-degree finger/mouse free-look offsets (radians) + auto-adjust idle timer
     lookYaw: 0,
     lookPitch: 0,
+    lookIdleTimer: 0,
     isLookDragging: false,
     noticeText: null as string | null,
     noticeSeverity: 'info' as 'info' | 'success' | 'warning' | 'danger',
@@ -389,9 +479,10 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       simRef.current.cameraMode = order[(curIdx + 1) % order.length];
       simRef.current.lookYaw = 0;
       simRef.current.lookPitch = 0;
+      simRef.current.lookIdleTimer = 0;
       showNotice(
         simRef.current.cameraMode === 'cabin'
-          ? 'Camera: CABIN — Live mirrors active · Drag to look 360°'
+          ? 'Camera: CABIN — Drag 360° (auto-centers when driving)'
           : `Camera: ${simRef.current.cameraMode.toUpperCase()}`,
         'info',
         2.2
@@ -415,6 +506,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     resetCameraLook() {
       simRef.current.lookYaw = 0;
       simRef.current.lookPitch = 0;
+      simRef.current.lookIdleTimer = 0;
     },
     toggleTransmission() {
       const s = simRef.current;
@@ -618,6 +710,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         // Double-tap smoothly recenters 360° camera look forward
         simRef.current.lookYaw = 0;
         simRef.current.lookPitch = 0;
+        simRef.current.lookIdleTimer = 0;
         lastTapTime = 0;
         return;
       }
@@ -626,6 +719,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       lastLookX = e.clientX;
       lastLookY = e.clientY;
       simRef.current.isLookDragging = true;
+      simRef.current.lookIdleTimer = 0;
       try {
         renderer.domElement.setPointerCapture(e.pointerId);
       } catch {
@@ -641,6 +735,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       lastLookY = e.clientY;
 
       const s = simRef.current;
+      s.lookIdleTimer = 0;
       // Full unrestricted 360° horizontal yaw + comfortable vertical pitch
       s.lookYaw -= dx * 0.0068;
       s.lookPitch = THREE.MathUtils.clamp(s.lookPitch - dy * 0.0046, -0.58, 0.72);
@@ -653,6 +748,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       if (lookPointerId !== e.pointerId) return;
       lookPointerId = null;
       simRef.current.isLookDragging = false;
+      simRef.current.lookIdleTimer = 0;
       try {
         if (renderer.domElement.hasPointerCapture(e.pointerId)) {
           renderer.domElement.releasePointerCapture(e.pointerId);
@@ -846,6 +942,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       s.collisionCooldown = 0;
       s.lookYaw = 0;
       s.lookPitch = 0;
+      s.lookIdleTimer = 0;
       s.rampHoldTimer = 0;
       s.rampStopZ = 0;
       s.trainingReported = false;
@@ -1065,61 +1162,289 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     document.addEventListener('fullscreenchange', onResize);
     document.addEventListener('webkitfullscreenchange', onResize);
 
-    // Solid OBB-style bus-vs-traffic physical collision & separation so bus NEVER passes through vehicles!
+    const getStaticColliderNotice = (cat: StaticColliderCategory, label: string): string => {
+      switch (cat) {
+        case 'toll':
+          return `Toll plaza structure impact (${label})! Keep inside open lane.`;
+        case 'dhaba':
+          return `Dhaba building contact (${label})! Park cleanly in the bus bay.`;
+        case 'market':
+          return `Hill market structure impact (${label})! Watch roadside shops & school.`;
+        case 'mandir':
+          return `Roadside Mandir boundary contact (${label})! Drive carefully.`;
+        case 'tunnel':
+          return `Tunnel concrete portal scrape! Stay centered in lane.`;
+        default:
+          return `Building impact (${label})! Maintain roadside clearance.`;
+      }
+    };
+
+    // Apply physical separation + normal velocity cancellation after an OBB collision
+    const applyObbResponse = (
+      hit: ObbHit,
+      damageDelta: number,
+      noticeText: string,
+      severity: 'warning' | 'danger'
+    ) => {
+      const s = simRef.current;
+      const sinH = Math.sin(s.busHeading);
+      const cosH = Math.cos(s.busHeading);
+      const push = hit.pen + 0.04;
+      s.busX += hit.mtvX * push;
+      s.busZ += hit.mtvZ * push;
+
+      const vx = sinH * s.speedMs;
+      const vz = cosH * s.speedMs;
+      const vn = vx * hit.mtvX + vz * hit.mtvZ;
+      if (vn < 0) {
+        const fwdAlign = Math.abs(sinH * hit.mtvX + cosH * hit.mtvZ);
+        if (fwdAlign > 0.52) {
+          // Head-on or rear-on solid stop with tiny bounce
+          s.speedMs = -Math.sign(s.speedMs) * Math.min(0.85, Math.abs(s.speedMs) * 0.14);
+        } else {
+          // Side scrape along obstacle wall
+          s.speedMs *= 0.74;
+        }
+      }
+
+      if (s.collisionCooldown <= 0 && (Math.abs(vn) > 1.0 || hit.pen > 0.14)) {
+        s.collisionCooldown = 0.78;
+        s.damagePct = Math.min(100, s.damagePct + damageDelta);
+        audio.playBump();
+        showNotice(noticeText, severity, 2.2);
+      }
+    };
+
+    // Exact 2D SAT bus-vs-traffic & Dhaba visitor vehicle physical collisions (nothing ghosts through!)
     const resolveBusTrafficCollisions = (
       trafficList: Array<{
         mesh: THREE.Group;
         halfWidth: number;
         halfLength: number;
-      }>
+        currentSpeedMult?: number;
+        yieldStopTimer?: number;
+      }>,
+      dhabasList: DhabaComplexData[] = []
     ) => {
       const s = simRef.current;
       const sinH = Math.sin(s.busHeading);
       const cosH = Math.cos(s.busHeading);
-      const busHalfW = 1.28;
-      const busHalfL = 5.45;
 
       for (const tv of trafficList) {
-        const dx = s.busX - tv.mesh.position.x;
-        const dz = s.busZ - tv.mesh.position.z;
-        // Quick broadphase skip
-        if (dx * dx + dz * dz > 144) continue;
+        tv.mesh.getWorldPosition(_tmpObjPos);
+        const dx = s.busX - _tmpObjPos.x;
+        const dz = s.busZ - _tmpObjPos.z;
+        const maxR = BUS_HALF_L + tv.halfLength + 2.2;
+        if (dx * dx + dz * dz > maxR * maxR) continue;
 
-        // Transform offset into bus-local frame (forward = (sinH, cosH), right = (cosH, -sinH))
-        const localLong = dx * sinH + dz * cosH;
-        const localLat = dx * cosH - dz * sinH;
+        tv.mesh.getWorldQuaternion(_tmpObjQuat);
+        _tmpObjFwd.set(0, 0, 1).applyQuaternion(_tmpObjQuat);
+        _tmpObjFwd.y = 0;
+        if (_tmpObjFwd.lengthSq() < 1e-4) _tmpObjFwd.set(0, 0, 1);
+        else _tmpObjFwd.normalize();
+        _tmpObjRight.set(_tmpObjFwd.z, 0, -_tmpObjFwd.x);
 
-        const sumW = busHalfW + tv.halfWidth;
-        const sumL = busHalfL + tv.halfLength;
+        const hit = computeObbCollision(
+          s.busX,
+          s.busZ,
+          sinH,
+          cosH,
+          cosH,
+          -sinH,
+          _tmpObjPos.x,
+          _tmpObjPos.z,
+          _tmpObjFwd.x,
+          _tmpObjFwd.z,
+          _tmpObjRight.x,
+          _tmpObjRight.z,
+          tv.halfWidth,
+          tv.halfLength
+        );
+        if (hit) {
+          // Immediately halt colliding traffic vehicle so it cannot drive through the bus
+          if (typeof tv.currentSpeedMult === 'number') tv.currentSpeedMult = 0;
+          if (typeof tv.yieldStopTimer === 'number') tv.yieldStopTimer = Math.max(tv.yieldStopTimer, 1.65);
+          applyObbResponse(hit, 3.5, 'Vehicle collision! Maintain safe highway clearance.', 'danger');
+        }
+      }
 
-        if (Math.abs(localLat) < sumW && Math.abs(localLong) < sumL) {
-          const penLat = sumW - Math.abs(localLat);
-          const penLong = sumL - Math.abs(localLong);
+      // Also collide solidly against visiting cars, bikes, SUVs & buses inside active Dhaba yards
+      for (const dh of dhabasList) {
+        const dDh = Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z);
+        if (dDh > 48) continue;
+        for (const v of dh.visitors) {
+          if (!v.mesh.visible) continue;
+          v.mesh.getWorldPosition(_tmpObjPos);
+          const dx = s.busX - _tmpObjPos.x;
+          const dz = s.busZ - _tmpObjPos.z;
+          const maxR = BUS_HALF_L + v.halfLength + 2.0;
+          if (dx * dx + dz * dz > maxR * maxR) continue;
 
-          if (penLat < penLong) {
-            // Side scrape / lateral separation
-            const sign = localLat >= 0 ? 1 : -1;
-            const push = penLat + 0.04;
-            s.busX += cosH * sign * push;
-            s.busZ -= sinH * sign * push;
-            s.speedMs *= 0.78;
-          } else {
-            // Front / rear solid bumper stop — physically prevent bus passing through vehicle!
-            const sign = localLong >= 0 ? 1 : -1;
-            const push = penLong + 0.06;
-            s.busX += sinH * sign * push;
-            s.busZ += cosH * sign * push;
-            // Cancel velocity component driving into the vehicle
-            if ((sign < 0 && s.speedMs > 0) || (sign > 0 && s.speedMs < 0)) {
-              s.speedMs = -Math.sign(s.speedMs) * Math.min(1.1, Math.abs(s.speedMs) * 0.16);
-            }
+          v.mesh.getWorldQuaternion(_tmpObjQuat);
+          _tmpObjFwd.set(0, 0, 1).applyQuaternion(_tmpObjQuat);
+          _tmpObjFwd.y = 0;
+          if (_tmpObjFwd.lengthSq() < 1e-4) _tmpObjFwd.set(0, 0, 1);
+          else _tmpObjFwd.normalize();
+          _tmpObjRight.set(_tmpObjFwd.z, 0, -_tmpObjFwd.x);
+
+          const hit = computeObbCollision(
+            s.busX,
+            s.busZ,
+            sinH,
+            cosH,
+            cosH,
+            -sinH,
+            _tmpObjPos.x,
+            _tmpObjPos.z,
+            _tmpObjFwd.x,
+            _tmpObjFwd.z,
+            _tmpObjRight.x,
+            _tmpObjRight.z,
+            v.halfWidth,
+            v.halfLength
+          );
+          if (hit) {
+            applyObbResponse(hit, 3.0, 'Dhaba parked vehicle contact! Watch parking bay traffic.', 'danger');
           }
+        }
+      }
+    };
 
-          if (s.collisionCooldown <= 0) {
-            s.collisionCooldown = 0.75;
-            s.damagePct = Math.min(100, s.damagePct + 3.5);
+    // Exact 2D SAT bus-vs-Static Structures (Toll plazas, Dhabas, Hill Market shops/school, Mandirs, Tunnels, Houses)
+    const resolveBusStaticCollisions = (colliders: StaticColliderOBB[]) => {
+      if (colliders.length === 0) return;
+      const s = simRef.current;
+      const sinH = Math.sin(s.busHeading);
+      const cosH = Math.cos(s.busHeading);
+
+      // 2 iterations ensure corner impacts against adjacent booths/walls resolve cleanly without tunneling
+      for (let pass = 0; pass < 2; pass++) {
+        let anyHit = false;
+        for (const col of colliders) {
+          if (col.isActive && !col.isActive()) continue;
+          const dx = s.busX - col.centerX;
+          const dz = s.busZ - col.centerZ;
+          const maxR = BUS_HALF_L + Math.hypot(col.halfWidth, col.halfLength) + 1.4;
+          if (dx * dx + dz * dz > maxR * maxR) continue;
+
+          const hit = computeObbCollision(
+            s.busX,
+            s.busZ,
+            sinH,
+            cosH,
+            cosH,
+            -sinH,
+            col.centerX,
+            col.centerZ,
+            col.forwardX,
+            col.forwardZ,
+            col.rightX,
+            col.rightZ,
+            col.halfWidth,
+            col.halfLength
+          );
+          if (hit) {
+            anyHit = true;
+            applyObbResponse(
+              hit,
+              col.category === 'toll' || col.category === 'tunnel' ? 3.2 : 2.8,
+              getStaticColliderNotice(col.category, col.label),
+              'warning'
+            );
+          }
+        }
+        if (!anyHit) break;
+      }
+    };
+
+    // 4-Corner Bus Hull vs. Mountain Cliff Wall & Valley Guardrail Collision (prevents 11m bus nose/tail clipping inside mountains!)
+    const enforceMountainAndParapetBounds = (
+      sample: { point: THREE.Vector3; tangent: THREE.Vector3; right: THREE.Vector3 },
+      roadW: number,
+      dhabasList: DhabaComplexData[],
+      marketsList: HillMarketTownData[],
+      allowNotice: boolean
+    ) => {
+      const s = simRef.current;
+      const sinH = Math.sin(s.busHeading);
+      const cosH = Math.cos(s.busHeading);
+
+      const nearExpandedYard =
+        dhabasList.some((dh) => Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 34) ||
+        marketsList.some((mk) => Math.hypot(s.busX - mk.position.x, s.busZ - mk.position.z) < 36);
+
+      // Left cliff slope rises right outside the curb unless inside a flattened Dhaba/Market yard
+      const minLeftLat = nearExpandedYard ? -(roadW * 0.5 + 16.5) : -(roadW * 0.5 + 0.32);
+      const maxRightLat = roadW * 0.5 + 0.22;
+
+      let minCornerLat = Infinity;
+      let maxCornerLat = -Infinity;
+      for (const [lx, lz] of BUS_CORNERS) {
+        const cx = s.busX + lx * cosH + lz * sinH;
+        const cz = s.busZ - lx * sinH + lz * cosH;
+        const lat =
+          (cx - sample.point.x) * sample.right.x + (cz - sample.point.z) * sample.right.z;
+        if (lat < minCornerLat) minCornerLat = lat;
+        if (lat > maxCornerLat) maxCornerLat = lat;
+      }
+
+      if (minCornerLat < minLeftLat) {
+        const pen = minLeftLat - minCornerLat;
+        s.busX += sample.right.x * (pen + 0.03);
+        s.busZ += sample.right.z * (pen + 0.03);
+
+        // Compute velocity driving INTO the left mountain cliff wall (-sample.right)
+        const vx = sinH * s.speedMs;
+        const vz = cosH * s.speedMs;
+        const velIntoCliff = -(vx * sample.right.x + vz * sample.right.z);
+        if (velIntoCliff > 0.25) {
+          const wallNormalDot = Math.abs(sinH * sample.right.x + cosH * sample.right.z);
+          if (wallNormalDot > 0.58) {
+            // Hard angled nose/tail impact into rock mountain wall -> stop bus cleanly
+            s.speedMs = -Math.sign(s.speedMs) * Math.min(0.7, Math.abs(s.speedMs) * 0.12);
+          } else {
+            s.speedMs *= 0.78;
+            // Gentle heading deflection along road tangent so bus slides off cliff cleanly
+            const tanYaw = Math.atan2(sample.tangent.x, sample.tangent.z);
+            const revYaw = Math.atan2(-sample.tangent.x, -sample.tangent.z);
+            const dFwd = Math.atan2(Math.sin(tanYaw - s.busHeading), Math.cos(tanYaw - s.busHeading));
+            const dRev = Math.atan2(Math.sin(revYaw - s.busHeading), Math.cos(revYaw - s.busHeading));
+            const diff = Math.abs(dFwd) <= Math.abs(dRev) ? dFwd : dRev;
+            s.busHeading += diff * Math.min(0.18, pen * 0.14);
+          }
+          if (allowNotice && s.collisionCooldown <= 0 && (velIntoCliff > 1.8 || pen > 0.22)) {
+            s.collisionCooldown = 0.8;
+            s.damagePct = Math.min(100, s.damagePct + 2.6);
             audio.playBump();
-            showNotice('Vehicle contact! Maintain lane clearance.', 'danger', 2.0);
+            showNotice('Mountain cliff wall impact! Keep bus inside the road.', 'warning', 2.0);
+          }
+        }
+      } else if (maxCornerLat > maxRightLat) {
+        const pen = maxCornerLat - maxRightLat;
+        s.busX -= sample.right.x * (pen + 0.03);
+        s.busZ -= sample.right.z * (pen + 0.03);
+
+        const vx = sinH * s.speedMs;
+        const vz = cosH * s.speedMs;
+        const velIntoGuard = vx * sample.right.x + vz * sample.right.z;
+        if (velIntoGuard > 0.25) {
+          const wallNormalDot = Math.abs(sinH * sample.right.x + cosH * sample.right.z);
+          if (wallNormalDot > 0.58) {
+            s.speedMs = -Math.sign(s.speedMs) * Math.min(0.7, Math.abs(s.speedMs) * 0.12);
+          } else {
+            s.speedMs *= 0.78;
+            const tanYaw = Math.atan2(sample.tangent.x, sample.tangent.z);
+            const revYaw = Math.atan2(-sample.tangent.x, -sample.tangent.z);
+            const dFwd = Math.atan2(Math.sin(tanYaw - s.busHeading), Math.cos(tanYaw - s.busHeading));
+            const dRev = Math.atan2(Math.sin(revYaw - s.busHeading), Math.cos(revYaw - s.busHeading));
+            const diff = Math.abs(dFwd) <= Math.abs(dRev) ? dFwd : dRev;
+            s.busHeading += diff * Math.min(0.18, pen * 0.14);
+          }
+          if (allowNotice && s.collisionCooldown <= 0 && (velIntoGuard > 1.8 || pen > 0.22)) {
+            s.collisionCooldown = 0.8;
+            s.damagePct = Math.min(100, s.damagePct + 2.4);
+            audio.playBump();
+            showNotice('Valley guardrail parapet impact! Stay inside highway lanes.', 'warning', 2.0);
           }
         }
       }
@@ -1222,7 +1547,9 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
             _busPosVec,
             false,
             s.weather === 'rain',
-            nightFactor
+            nightFactor,
+            s.timeOfDayHours,
+            s.weather
           );
         }
         return;
@@ -1461,7 +1788,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.busY = THREE.MathUtils.damp(s.busY, groundY, 14, dt);
         s.distanceDrivenM += Math.abs(distMove);
 
-        // Highway shoulder guardrails in Career & Endless modes (widens on LEFT side at Dhabas so player can enter Bus Parking Bay!)
+        // 4-Corner Bus Hull vs Mountain Cliff Wall & Valley Guardrail bounds (bus NEVER clips into mountains!)
         const activeSample = careerRoadSample || endlessRoadSample;
         const activeRoadW = himachalWorld?.roadWidth ?? endlessWorld?.roadWidth ?? 11.2;
         if ((curMode === 'career' || curMode === 'endless') && activeSample) {
@@ -1471,25 +1798,13 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
               : curMode === 'endless' && endlessWorld
                 ? endlessWorld.getDhabas()
                 : [];
-          const nearDhabaYard = activeDhabas.some(
-            (dh) => Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 25
-          );
-          const maxRightLat = activeRoadW * 0.5 - 1.15;
-          const minLeftLat = nearDhabaYard ? -(activeRoadW * 0.5 + 8.5) : -maxRightLat;
-
-          if (activeSample.lateralOffset > maxRightLat || activeSample.lateralOffset < minLeftLat) {
-            const clampedLat = THREE.MathUtils.clamp(activeSample.lateralOffset, minLeftLat, maxRightLat);
-            const correction = clampedLat - activeSample.lateralOffset;
-            s.busX += activeSample.right.x * correction;
-            s.busZ += activeSample.right.z * correction;
-            if (Math.abs(s.speedMs) > 5.0 && s.collisionCooldown <= 0) {
-              s.collisionCooldown = 0.8;
-              s.speedMs *= 0.78;
-              s.damagePct = Math.min(100, s.damagePct + 2.0);
-              audio.playBump();
-              showNotice('Highway shoulder guardrail scrape! Keep inside lanes.', 'warning', 1.8);
-            }
-          }
+          const activeMarkets: HillMarketTownData[] =
+            curMode === 'career' && himachalWorld
+              ? himachalWorld.markets
+              : curMode === 'endless' && endlessWorld
+                ? endlessWorld.getMarkets()
+                : [];
+          enforceMountainAndParapetBounds(activeSample, activeRoadW, activeDhabas, activeMarkets, true);
         }
 
         if (curMode === 'training') {
@@ -1568,11 +1883,23 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           _doorWorld,
           hornMelody || hornAir,
           s.weather === 'rain',
-          nightFactor
+          nightFactor,
+          s.timeOfDayHours,
+          s.weather
         );
 
-        // Solid physical collision resolution (bus NEVER clips through cars/buses/trucks!)
-        resolveBusTrafficCollisions(himachalWorld.traffic);
+        // Solid 2D SAT physical collisions: Structures (Tolls, Dhabas, Hill Markets, Mandirs, Tunnels, Houses) + Traffic & Dhaba Vehicles
+        resolveBusStaticCollisions(himachalWorld.colliders);
+        resolveBusTrafficCollisions(himachalWorld.traffic, himachalWorld.dhabas);
+        if (careerRoadSample) {
+          enforceMountainAndParapetBounds(
+            careerRoadSample,
+            himachalWorld.roadWidth,
+            himachalWorld.dhabas,
+            himachalWorld.markets,
+            false
+          );
+        }
 
         // Career-ONLY NHAI Toll Plazas (deducts ₹400–₹500 once per toll pass)
         for (const tl of himachalWorld.tolls) {
@@ -1687,10 +2014,24 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           s.speedMs,
           hornMelody || hornAir,
           s.weather === 'rain',
-          nightFactor
+          nightFactor,
+          s.timeOfDayHours,
+          s.weather
         );
-        // Solid vehicle collisions in Endless Mode too (ZERO tolls!)
-        resolveBusTrafficCollisions(endlessWorld.traffic);
+        // Solid 2D SAT collisions against buildings, dhabas, markets, mandirs, tunnels, traffic & mountain walls (ZERO tolls!)
+        const endlessDhabas = endlessWorld.getDhabas();
+        const endlessMarkets = endlessWorld.getMarkets();
+        resolveBusStaticCollisions(endlessWorld.getColliders());
+        resolveBusTrafficCollisions(endlessWorld.traffic, endlessDhabas);
+        if (endlessRoadSample) {
+          enforceMountainAndParapetBounds(
+            endlessRoadSample,
+            endlessWorld.roadWidth,
+            endlessDhabas,
+            endlessMarkets,
+            false
+          );
+        }
       }
 
       // Half-Road Landslide Collision, Proximity Prompt & JCB Manual Clearance Bonus (Career & Endless)
@@ -1911,10 +2252,32 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
               break;
             }
           }
+          if (!nearDhabaCrowd) {
+            for (const dh of himachalWorld.dhabas) {
+              if (Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 42) {
+                nearDhabaCrowd = true;
+                break;
+              }
+            }
+          }
+          if (!nearStopCrowd) {
+            for (const mk of himachalWorld.markets) {
+              if (Math.hypot(s.busX - mk.position.x, s.busZ - mk.position.z) < 44) {
+                nearStopCrowd = true;
+                break;
+              }
+            }
+          }
         } else if (curMode === 'endless' && endlessWorld) {
           for (const dh of endlessWorld.getDhabas()) {
-            if (Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 40) {
+            if (Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 42) {
               nearDhabaCrowd = true;
+              break;
+            }
+          }
+          for (const mk of endlessWorld.getMarkets()) {
+            if (Math.hypot(s.busX - mk.position.x, s.busZ - mk.position.z) < 44) {
+              nearStopCrowd = true;
               break;
             }
           }
@@ -2097,6 +2460,25 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 4, dt);
         camera.updateProjectionMatrix();
       } else if (s.cameraMode === 'cabin') {
+        // Auto-Adjustable Cockpit Camera: when driver drags to inspect side/cabin and the bus moves,
+        // smoothly auto-adjust back to standard forward road view within ~1 second!
+        if (
+          !s.isLookDragging &&
+          Math.abs(s.speedMs) > 0.45 &&
+          (Math.abs(s.lookYaw) > 0.002 || Math.abs(s.lookPitch) > 0.002)
+        ) {
+          s.lookIdleTimer += dt;
+          if (s.lookIdleTimer > 0.16) {
+            s.lookYaw = Math.atan2(Math.sin(s.lookYaw), Math.cos(s.lookYaw));
+            s.lookYaw = THREE.MathUtils.damp(s.lookYaw, 0, 6.2, dt);
+            s.lookPitch = THREE.MathUtils.damp(s.lookPitch, 0, 6.2, dt);
+            if (Math.abs(s.lookYaw) < 0.004) s.lookYaw = 0;
+            if (Math.abs(s.lookPitch) < 0.004) s.lookPitch = 0;
+          }
+        } else if (s.isLookDragging) {
+          s.lookIdleTimer = 0;
+        }
+
         // Balanced slightly zoomed-in RHD Driver Eye Position: clearer front road & wipers while keeping
         // steering wheel, driver hands, live rear-view mirrors, gauges, radio & gear lever cleanly in frame!
         _cornerVec.set(-0.66, 2.22, 4.06).applyMatrix4(bus.root.matrixWorld);

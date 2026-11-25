@@ -160,7 +160,7 @@ export const DriverLogbookView: React.FC<DriverLogbookViewProps> = ({
 
         {/* Career Totals & Profile Preferences Form */}
         <div className="lg:col-span-7 flex flex-col gap-5">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="p-4 rounded-xl bg-[#111A28] border border-slate-800">
               <div className="text-xs text-slate-400 mb-1">Total Fare Earnings</div>
               <div className="font-mono text-2xl font-bold text-emerald-400 tabular-nums">

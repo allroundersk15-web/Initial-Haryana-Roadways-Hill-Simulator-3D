@@ -398,30 +398,30 @@ export default function App() {
     <div className="min-h-screen w-full bg-[#0B111A] text-slate-100 relative overflow-x-hidden">
       {/* Persistent Top Navigation Header (hidden during active 3D driving for maximum scenic visibility) */}
       {view !== 'driving' && (
-        <header className="fixed top-0 left-0 right-0 z-40 h-14 bg-[#0B111A]/95 border-b border-slate-800/90 px-4 md:px-6 flex items-center justify-between gap-4">
+        <header className="fixed top-0 left-0 right-0 z-40 h-12 sm:h-14 bg-[#0B111A]/95 border-b border-slate-800/90 px-2.5 sm:px-4 md:px-6 flex items-center justify-between gap-2 sm:gap-4">
           <button
             type="button"
             onClick={() => {
               setSimMode('showcase');
               setView('hub');
             }}
-            className="flex items-center gap-2.5 text-left cursor-pointer shrink-0"
+            className="flex items-center gap-2 sm:gap-2.5 text-left cursor-pointer shrink-0"
           >
-            <span className="w-8 h-8 rounded-lg bg-[#0B5ED7] flex items-center justify-center text-white shrink-0">
+            <span className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-[#0B5ED7] flex items-center justify-center text-white shrink-0">
               <Bus className="w-4 h-4" />
             </span>
             <div className="leading-tight">
-              <div className="font-display text-sm md:text-base font-bold text-white whitespace-nowrap">
+              <div className="font-display text-xs sm:text-sm md:text-base font-bold text-white whitespace-nowrap">
                 HARYANA ROADWAYS 3D
               </div>
-              <div className="text-[10px] text-amber-300 font-medium hidden sm:block whitespace-nowrap">
+              <div className="text-[10px] text-amber-300 font-medium hidden md:block whitespace-nowrap">
                 {activeBusSpec.operatorName} · {activeBusSpec.defaultPlate}
               </div>
             </div>
           </button>
 
           {/* Primary Single-Row Navigation */}
-          <nav className="flex items-center gap-1 md:gap-1.5 overflow-x-auto">
+          <nav className="flex items-center gap-1 md:gap-1.5 min-w-0 flex-1 justify-start md:justify-center overflow-x-auto py-1">
             <button
               type="button"
               onClick={() => {
@@ -594,73 +594,82 @@ export default function App() {
         </div>
       )}
 
-      {/* LANDING HUB OVERLAY */}
+      {/* LANDING HUB OVERLAY — Responsive Text Box & Controls for Vertical (Portrait) & Horizontal (Landscape) */}
       {view === 'hub' && (
-        <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-end p-5 md:p-10 pb-8 md:pb-12">
-          <div className="pointer-events-auto max-w-2xl hud-panel rounded-2xl p-6 border-white/25">
-            <p className="text-xs font-semibold text-amber-300 tracking-wide mb-1.5">
-              {activeBusSpec.hindiName} · Active Fleet Coach: {activeBusSpec.operatorName}
-            </p>
-            <h1 className="font-display text-3xl md:text-4xl font-bold text-white leading-tight mb-2.5">
-              Haryana Roadways Hill Bus Simulator 3D
-            </h1>
-            <p className="text-sm text-slate-200 leading-relaxed mb-5">
-              Drive Haryana Roadways, HRTC Himachal, PUNBUS Punjab, UPSRTC, RSRTC, UTC &amp; DTC
-              coaches through long mountain highways, curved rock tunnels, NHAI toll plazas, or
-              seamless Endless Mode spanning Himalayan climbs to North India plains. Drag anywhere
-              to look 360° inside the cockpit.
-            </p>
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 top-12 sm:top-14 z-20 flex flex-col justify-end items-center lg:items-start p-3 sm:p-5 md:p-8 pb-4 sm:pb-7 md:pb-10">
+          <div className="pointer-events-auto w-full max-w-xl landscape:max-w-5xl lg:max-w-4xl max-h-full overflow-y-auto hud-panel rounded-2xl p-4 sm:p-5 md:p-6 [@media(max-height:520px)]:p-3.5 border-white/25 shadow-2xl">
+            <div className="flex flex-col gap-3.5 landscape:grid landscape:grid-cols-12 landscape:items-center landscape:gap-4 lg:grid lg:grid-cols-12 lg:items-center lg:gap-6">
+              {/* Title & Description Text Box */}
+              <div className="landscape:col-span-6 lg:col-span-6 min-w-0">
+                <p className="text-[11px] sm:text-xs font-semibold text-amber-300 tracking-wide mb-1 truncate">
+                  {activeBusSpec.hindiName} · {activeBusSpec.operatorName}
+                </p>
+                <h1 className="font-display text-xl sm:text-3xl landscape:text-xl md:landscape:text-2xl lg:text-3xl font-bold text-white leading-tight mb-1.5 sm:mb-2">
+                  Haryana Roadways Hill Bus Simulator 3D
+                </h1>
+                <p className="text-xs sm:text-sm landscape:text-xs md:landscape:text-sm text-slate-200/95 leading-relaxed [@media(max-height:520px)]:line-clamp-2">
+                  Drive state roadways coaches across Himalayan highways, mountain bazaars, roadside
+                  Dhabas, curved tunnels, and NHAI tolls — or explore non-stop Endless Mode through
+                  high-altitude clouds and plains.
+                </p>
+              </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
-              <button
-                type="button"
-                onClick={launchCareerDrive}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#0B5ED7] hover:bg-[#094DB2] text-white text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                Career: Kalka → Shimla
-              </button>
+              {/* Structured Action Grid (Clean in both Vertical & Horizontal) */}
+              <div className="landscape:col-span-6 lg:col-span-6 grid grid-cols-2 gap-2 sm:gap-2.5">
+                <button
+                  type="button"
+                  onClick={launchCareerDrive}
+                  className="col-span-2 sm:col-span-1 inline-flex items-center justify-center gap-2 px-3.5 py-2.5 [@media(max-height:520px)]:py-2 rounded-xl bg-[#0B5ED7] hover:bg-[#094DB2] text-white text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <Play className="w-4 h-4 fill-current shrink-0" />
+                  <span className="truncate">Career: Kalka → Shimla</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={launchEndlessDrive}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              >
-                <InfinityIcon className="w-4 h-4" />
-                Endless Highway (No Tolls)
-              </button>
+                <button
+                  type="button"
+                  onClick={launchEndlessDrive}
+                  className="col-span-2 sm:col-span-1 inline-flex items-center justify-center gap-2 px-3.5 py-2.5 [@media(max-height:520px)]:py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <InfinityIcon className="w-4 h-4 shrink-0" />
+                  <span className="truncate">Endless Highway</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setView('garage')}
-                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white/15 hover:bg-white/25 border border-white/25 text-amber-300 text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              >
-                <Store className="w-4 h-4" />
-                State Bus Garage (₹{profile.totalEarningsInr.toLocaleString('en-IN')})
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setView('garage')}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 [@media(max-height:520px)]:py-2 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 text-amber-300 text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <Store className="w-4 h-4 shrink-0" />
+                  <span className="truncate">Garage (₹{profile.totalEarningsInr.toLocaleString('en-IN')})</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setView('career-map')}
-                className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 text-white text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              >
-                <Compass className="w-4 h-4 text-sky-400" />
-                Routes ({CAREER_ROUTES.length})
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setView('career-map')}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 [@media(max-height:520px)]:py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <Compass className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span className="truncate">Routes ({CAREER_ROUTES.length})</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => void toggleFullscreen()}
-                className="hud-compact inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-white hover:bg-white/20 text-sm font-semibold transition-all whitespace-nowrap cursor-pointer"
-              >
-                {isFullscreen ? <Minimize2 className="w-4 h-4 text-sky-300" /> : <Maximize2 className="w-4 h-4 text-sky-300" />}
-                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => void toggleFullscreen()}
+                  className="col-span-2 hud-compact inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-xl text-white hover:bg-white/20 text-xs sm:text-sm font-semibold transition-all whitespace-nowrap cursor-pointer"
+                >
+                  {isFullscreen ? (
+                    <Minimize2 className="w-4 h-4 text-sky-300 shrink-0" />
+                  ) : (
+                    <Maximize2 className="w-4 h-4 text-sky-300 shrink-0" />
+                  )}
+                  <span>{isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}</span>
+                </button>
+              </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-white/15 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-300">
+            <div className="mt-3 pt-2.5 border-t border-white/15 hidden sm:flex [@media(max-height:460px)]:hidden flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono text-slate-300">
               <span>WASD / Wheel: Drive</span>
-              <span>Drag Screen: 360° Look</span>
+              <span>Drag Screen: 360° Look (Auto-Centers)</span>
               <span>H / G: Horns</span>
               <span>O: Door</span>
               <span>M / Q / E: Gears</span>

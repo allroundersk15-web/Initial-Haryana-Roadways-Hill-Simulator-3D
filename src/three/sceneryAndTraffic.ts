@@ -10,6 +10,72 @@ export interface TrafficVehicleAsset {
   brakeLightMat: THREE.MeshStandardMaterial;
 }
 
+export type StaticColliderCategory =
+  | 'toll'
+  | 'building'
+  | 'dhaba'
+  | 'mandir'
+  | 'market'
+  | 'tunnel'
+  | 'house';
+
+export interface StaticColliderOBB {
+  id: string;
+  label: string;
+  category: StaticColliderCategory;
+  centerX: number;
+  centerZ: number;
+  forwardX: number;
+  forwardZ: number;
+  rightX: number;
+  rightZ: number;
+  halfWidth: number;
+  halfLength: number;
+  isActive?: () => boolean;
+}
+
+/**
+ * Converts a local box inside a group oriented via `group.lookAt(origin + tan)`
+ * (where local +Z = tan and local +X = left = -right) into a world-space 2D OBB collider.
+ */
+export function makeLocalColliderOBB(
+  origin: THREE.Vector3,
+  tan: THREE.Vector3,
+  right: THREE.Vector3,
+  localX: number,
+  localZ: number,
+  halfWidth: number,
+  halfLength: number,
+  id: string,
+  label: string,
+  category: StaticColliderCategory,
+  isActive?: () => boolean
+): StaticColliderOBB {
+  const fLen = Math.hypot(tan.x, tan.z) || 1;
+  const fx = tan.x / fLen;
+  const fz = tan.z / fLen;
+  const rLen = Math.hypot(right.x, right.z) || 1;
+  const rx = right.x / rLen;
+  const rz = right.z / rLen;
+  // local +X in Three.js lookAt(pos + tan) is left (-right)
+  const centerX = origin.x - rx * localX + fx * localZ;
+  const centerZ = origin.z - rz * localX + fz * localZ;
+  return {
+    id,
+    label,
+    category,
+    centerX,
+    centerZ,
+    forwardX: fx,
+    forwardZ: fz,
+    rightX: rx,
+    rightZ: rz,
+    halfWidth,
+    halfLength,
+    isActive,
+  };
+}
+
 export interface TollPlazaData {
   id: string;
   name: string;
@@ -17,9 +83,11 @@ export interface TollPlazaData {
   t: number;
   position: THREE.Vector3;
   tangent: THREE.Vector3;
+  right: THREE.Vector3;
   barrierPivot: THREE.Group;
   paid: boolean;
   barrierOpenAnim: number;
+  colliders: StaticColliderOBB[];
 }
 
 export function createHighDetailAsphaltTexture(maxAniso: number, repeatY = 380): THREE.CanvasTexture {
@@ -783,8 +851,9 @@ export function buildCurvedMountainTunnel(
   roadWidth: number,
   tunnelName: string,
   maxAniso: number
-): THREE.Group {
+): { group: THREE.Group; colliders: StaticColliderOBB[] } {
   const group = new THREE.Group();
+  const colliders: StaticColliderOBB[] = [];
   const upVec = new THREE.Vector3(0, 1, 0);
   const steps = 28;
   const archSteps = 12;
@@ -886,7 +955,7 @@ export function buildCurvedMountainTunnel(
   });
   group.add(new THREE.Mesh(rockGeo, rockMat));
 
-  // Entrance & Exit Concrete Portal Facades with Signboards
+  // Entrance & Exit Concrete Portal Facades with Signboards & Solid Pier Colliders
   const signTex = createSignboardTexture(
     tunnelName,
     'SWITCH ON HEADLIGHTS (L) • KEEP IN LANE',
@@ -902,6 +971,7 @@ export function buildCurvedMountainTunnel(
   ] as const) {
     const p = curve.getPointAt(portalT);
     const tan = curve.getTangentAt(portalT).normalize();
+    const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
     const portal = new THREE.Group();
     portal.position.copy(p);
     portal.lookAt(p.clone().add(flip ? tan.clone().negate() : tan));
@@ -911,6 +981,21 @@ export function buildCurvedMountainTunnel(
       const pier = new THREE.Mesh(new THREE.BoxGeometry(1.4, totalHeight + 1.2, 1.4), portalMat);
       pier.position.set(sx, (totalHeight + 1.2) / 2, 0);
       portal.add(pier);
+
+      colliders.push(
+        makeLocalColliderOBB(
+          p,
+          tan,
+          right,
+          sx,
+          0,
+          0.75,
+          0.85,
+          `${tunnelName}-pier-${portalT}-${sx}`,
+          `${tunnelName} Concrete Portal Wall`,
+          'tunnel'
+        )
+      );
     }
     // Overhead concrete lintel header beam (high above bus roof!)
     const lintel = new THREE.Mesh(new THREE.BoxGeometry((innerHalfW + 1.35) * 2, 1.5, 1.5), portalMat);
@@ -928,7 +1013,7 @@ export function buildCurvedMountainTunnel(
     group.add(portal);
   }
 
-  return group;
+  return { group, colliders };
 }
 
 /**
@@ -1032,20 +1117,60 @@ export function buildNhaiTollPlaza(
   }
   group.add(barrierPivot);
 
-  return {
-    group,
-    data: {
-      id,
-      name,
-      feeInr,
-      t,
-      position: pos.clone(),
-      tangent: tan.clone(),
-      barrierPivot,
-      paid: false,
-      barrierOpenAnim: 0,
-    },
+  const upVec = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+
+  // Register exact solid OBB colliders for all 3 concrete toll islands/booths + closed boom barrier!
+  const colliders: StaticColliderOBB[] = [];
+  const data: TollPlazaData = {
+    id,
+    name,
+    feeInr,
+    t,
+    position: pos.clone(),
+    tangent: tan.clone(),
+    right,
+    barrierPivot,
+    paid: false,
+    barrierOpenAnim: 0,
+    colliders,
   };
+
+  for (const bx of [-halfW - 1.35, 0.25, halfW + 1.35]) {
+    colliders.push(
+      makeLocalColliderOBB(
+        pos,
+        tan,
+        right,
+        bx,
+        0,
+        0.68,
+        3.85,
+        `${id}-booth-${bx}`,
+        `${name} Concrete Booth`,
+        'toll'
+      )
+    );
+  }
+
+  // Solid boom barrier collider when closed (opens smoothly when approaching slowly/FASTag paid)
+  colliders.push(
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      2.95,
+      -1.6,
+      2.15,
+      0.28,
+      `${id}-barrier`,
+      `${name} Boom Barrier`,
+      'toll',
+      () => !data.paid && data.barrierOpenAnim < 0.62
+    )
+  );
+
+  return { group, data };
 }
 
 export interface LandslideZoneData {
@@ -1347,6 +1472,8 @@ export interface DhabaVisitorVehicle {
   mesh: THREE.Group;
   riderGroup?: THREE.Group;
   kind: 'bike' | 'car' | 'suv' | 'bus';
+  halfWidth: number;
+  halfLength: number;
   parkLocalX: number;
   parkLocalZ: number;
   parkYaw: number;
@@ -1378,6 +1505,7 @@ export interface DhabaComplexData {
   crowd: DhabaCrowdPerson[];
   nightLightMats: THREE.MeshStandardMaterial[];
   dhabaPointLight: THREE.PointLight;
+  colliders: StaticColliderOBB[];
 }
 
 function buildDhabaGuestPerson(seed: number): THREE.Group {
@@ -1648,6 +1776,8 @@ export function buildDynamicDhabaComplex(
     mesh: bike1.group,
     riderGroup: bike1.riderGroup,
     kind: 'bike',
+    halfWidth: 0.42,
+    halfLength: 1.05,
     parkLocalX: halfW + 9.2,
     parkLocalZ: -7.8,
     parkYaw: 0.95,
@@ -1665,6 +1795,8 @@ export function buildDynamicDhabaComplex(
     mesh: bike2.group,
     riderGroup: bike2.riderGroup,
     kind: 'bike',
+    halfWidth: 0.42,
+    halfLength: 1.05,
     parkLocalX: halfW + 9.6,
     parkLocalZ: -4.6,
     parkYaw: 1.05,
@@ -1681,6 +1813,8 @@ export function buildDynamicDhabaComplex(
   visitors.push({
     mesh: car.group,
     kind: 'car',
+    halfWidth: car.halfWidth,
+    halfLength: car.halfLength,
     parkLocalX: halfW + 8.6,
     parkLocalZ: 0.6,
     parkYaw: 0.62,
@@ -1697,6 +1831,8 @@ export function buildDynamicDhabaComplex(
   visitors.push({
     mesh: suv.group,
     kind: 'suv',
+    halfWidth: suv.halfWidth,
+    halfLength: suv.halfLength,
     parkLocalX: halfW + 8.8,
     parkLocalZ: 6.4,
     parkYaw: 0.55,
@@ -1713,6 +1849,8 @@ export function buildDynamicDhabaComplex(
   visitors.push({
     mesh: visitBus.group,
     kind: 'bus',
+    halfWidth: visitBus.halfWidth,
+    halfLength: visitBus.halfLength,
     parkLocalX: halfW + 4.3,
     parkLocalZ: 10.5,
     parkYaw: 0.12,
@@ -1722,6 +1860,74 @@ export function buildDynamicDhabaComplex(
     cycleDuration: 46,
     phaseTime: 14.0,
   });
+
+  // High-visibility Roadside Dhaba Entrance Arch Banner so drivers spot the Dhaba from 200m+ away!
+  const archPillarMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.55, metalness: 0.25 });
+  for (const ax of [halfW + 0.9, halfW + 9.2]) {
+    const archPole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 5.4, 8), archPillarMat);
+    archPole.position.set(ax, 2.7, -19.2);
+    group.add(archPole);
+  }
+  const archTex = createSignboardTexture(
+    `${title}`,
+    'DHABA BUS PARKING • CHAI • PARANTHA • MEALS',
+    '#9A3412',
+    '#FEF08A',
+    '#F59E0B',
+    maxAniso
+  );
+  const archMat = new THREE.MeshStandardMaterial({
+    map: archTex,
+    emissiveMap: archTex,
+    emissive: 0xffd599,
+    emissiveIntensity: 0.55,
+    roughness: 0.35,
+  });
+  nightLightMats.push(archMat);
+  const archBoard = new THREE.Mesh(new THREE.BoxGeometry(8.8, 1.35, 0.22), archMat);
+  archBoard.position.set(halfW + 5.05, 5.2, -19.2);
+  archBoard.rotation.y = Math.PI;
+  group.add(archBoard);
+
+  // Solid OBB Colliders for Dhaba Hall, Veranda/Charpai Courtyard, Tandoor & Entrance Pillars
+  const colliders: StaticColliderOBB[] = [
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      hallX - 0.6,
+      0,
+      3.8,
+      9.8,
+      `${id}-hall`,
+      `${title} Building`,
+      'dhaba'
+    ),
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      hallX - 4.8,
+      0,
+      1.1,
+      8.2,
+      `${id}-charpais`,
+      `${title} Veranda & Seating`,
+      'dhaba'
+    ),
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      halfW + 0.9,
+      -19.2,
+      0.55,
+      0.55,
+      `${id}-arch-pole`,
+      `${title} Entrance Pillar`,
+      'dhaba'
+    ),
+  ];
 
   const busBayWorldPos = pos
     .clone()
@@ -1740,6 +1946,7 @@ export function buildDynamicDhabaComplex(
     crowd,
     nightLightMats,
     dhabaPointLight,
+    colliders,
   };
 }
 
@@ -1817,4 +2024,625 @@ export function updateDhabaComplex(
     }
   }
 }
+
+export interface HillMarketTownData {
+  id: string;
+  title: string;
+  position: THREE.Vector3;
+  tangent: THREE.Vector3;
+  right: THREE.Vector3;
+  group: THREE.Group;
+  crowd: DhabaCrowdPerson[];
+  nightLightMats: THREE.MeshStandardMaterial[];
+  marketLight: THREE.PointLight;
+  colliders: StaticColliderOBB[];
+}
+
+/**
+ * Builds an authentic clustered Himachali Hill Market Town Complex where roadside bazaar shops,
+ * terraced Pahadi residential houses, and a Government Hill School sit together side-by-side
+ * with animated shoppers/students, parked scooters/cars, warm night lighting, and solid OBB colliders!
+ */
+export function buildHillMarketTownComplex(
+  id: string,
+  title: string,
+  hindiName: string,
+  pos: THREE.Vector3,
+  tan: THREE.Vector3,
+  roadWidth: number,
+  maxAniso: number
+): HillMarketTownData {
+  const group = new THREE.Group();
+  group.position.copy(pos);
+  group.lookAt(pos.clone().add(tan));
+
+  const upVec = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+  const halfW = roadWidth * 0.5;
+
+  const colliders: StaticColliderOBB[] = [];
+  const nightLightMats: THREE.MeshStandardMaterial[] = [];
+  const crowd: DhabaCrowdPerson[] = [];
+
+  const concreteMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.9 });
+  const asphaltApronMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.92 });
+  const stoneMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.94 });
+  const woodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a26, roughness: 0.86 });
+  const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5, metalness: 0.55 });
+
+  // 1. Paved Roadside Bazaar Walkway & Pull-off Shoulder (+X = uphill left side)
+  const yardW = 24.0;
+  const yardL = 58.0;
+  const apron = new THREE.Mesh(new THREE.BoxGeometry(yardW, 0.16, yardL), asphaltApronMat);
+  apron.position.set(halfW + yardW * 0.5 - 0.3, -0.02, 0);
+  apron.receiveShadow = true;
+  group.add(apron);
+
+  // Raised pedestrian shopfront curb
+  const curb = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.28, 34.0), concreteMat);
+  curb.position.set(halfW + 6.4, 0.14, -9.5);
+  curb.receiveShadow = true;
+  group.add(curb);
+
+  // 2. Row of 5 Colourful Pahadi Bazaar Shops (Kirana, Medical, Chai & Sweets, Woollens, Apple Mandi)
+  const shopSpecs: Array<{
+    name: string;
+    sub: string;
+    wall: number;
+    awning: number;
+    roof: number;
+    h: number;
+  }> = [
+    { name: 'SHARMA KIRANA STORE', sub: 'हिमाचल किराना व जनरल स्टोर', wall: 0xfef3c7, awning: 0xdc2626, roof: 0x15803d, h: 4.1 },
+    { name: 'PAHADI CHAI & SWEETS', sub: 'गरम समोसा • जलेबी • चाय', wall: 0xfce7f3, awning: 0xd97706, roof: 0x991b1b, h: 4.8 },
+    { name: 'HIMALAYA MEDICAL HALL', sub: '24 HR CHEMIST & CLINIC', wall: 0xdbeafe, awning: 0x0284c7, roof: 0x1e40af, h: 4.3 },
+    { name: 'KULLU SHAWL & WOOLLENS', sub: 'कुल्लू टोपी व ऊनी कपड़े', wall: 0xdcfce7, awning: 0x16a34a, roof: 0x334155, h: 5.1 },
+    { name: 'HIMACHAL APPLE MANDI', sub: 'ताज़ा सेब व पहाड़ी सब्जी', wall: 0xffedd5, awning: 0xea580c, roof: 0x7c2d12, h: 4.0 },
+  ];
+
+  const shopRowX = halfW + 9.4;
+  const shopWindowMat = new THREE.MeshStandardMaterial({
+    color: 0xfef9c3,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.45,
+    roughness: 0.22,
+  });
+  nightLightMats.push(shopWindowMat);
+
+  shopSpecs.forEach((sp, i) => {
+    const sz = -22.5 + i * 6.4;
+    const shopW = 5.6;
+    const shopL = 5.9;
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(shopW, sp.h, shopL),
+      new THREE.MeshStandardMaterial({ color: sp.wall, roughness: 0.84 })
+    );
+    body.position.set(shopRowX, sp.h * 0.5 + 0.14, sz);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+
+    // Pitched Himalayan tin roof
+    const roof = new THREE.Mesh(
+      new THREE.ConeGeometry(4.5, 1.55, 4),
+      new THREE.MeshStandardMaterial({ color: sp.roof, roughness: 0.55, metalness: 0.28 })
+    );
+    roof.rotation.y = Math.PI / 4;
+    roof.position.set(shopRowX, sp.h + 0.9, sz);
+    roof.castShadow = true;
+    group.add(roof);
+
+    // Striped shop awning projecting toward highway (-X)
+    const awning = new THREE.Mesh(
+      new THREE.BoxGeometry(2.1, 0.14, shopL - 0.3),
+      new THREE.MeshStandardMaterial({ color: sp.awning, roughness: 0.72 })
+    );
+    awning.position.set(shopRowX - 3.65, 2.7, sz);
+    awning.rotation.z = -0.22;
+    group.add(awning);
+
+    // Illuminated display window & wooden goods crates
+    const win = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.55, 3.6), shopWindowMat);
+    win.position.set(shopRowX - shopW * 0.5 - 0.04, 1.65, sz);
+    group.add(win);
+
+    const crate = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.62, 1.8), woodMat);
+    crate.position.set(shopRowX - 3.5, 0.52, sz + 1.1);
+    group.add(crate);
+
+    // Crisp individual shop signboard
+    const sTex = createSignboardTexture(sp.name, sp.sub, '#0F172A', '#FFFFFF', '#FACC15', maxAniso);
+    const sMat = new THREE.MeshStandardMaterial({
+      map: sTex,
+      emissiveMap: sTex,
+      emissive: 0xffe4b5,
+      emissiveIntensity: 0.35,
+      roughness: 0.38,
+    });
+    nightLightMats.push(sMat);
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.85, shopL - 0.4), sMat);
+    board.position.set(shopRowX - shopW * 0.5 - 0.14, 3.45, sz);
+    group.add(board);
+  });
+
+  // Solid OBB collider covering the entire 5-shop bazaar block
+  colliders.push(
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      shopRowX - 0.3,
+      -9.7,
+      3.45,
+      16.4,
+      `${id}-shops`,
+      `${title} Market Shops`,
+      'market'
+    )
+  );
+
+  // Main Overhead Market Arch / Name Board
+  const mainSignTex = createSignboardTexture(
+    title,
+    `${hindiName} • BAZAAR, HOMES & SCHOOL`,
+    '#1E293B',
+    '#FFFFFF',
+    '#38BDF8',
+    maxAniso
+  );
+  const mainSignMat = new THREE.MeshStandardMaterial({
+    map: mainSignTex,
+    emissiveMap: mainSignTex,
+    emissive: 0xe0f2fe,
+    emissiveIntensity: 0.4,
+    roughness: 0.35,
+  });
+  nightLightMats.push(mainSignMat);
+  const marketBoard = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.5, 13.5), mainSignMat);
+  marketBoard.position.set(shopRowX - 3.2, 6.2, -9.7);
+  group.add(marketBoard);
+
+  // 3. Government Hill School right alongside the market (Z = +10..+27)
+  const schoolX = halfW + 12.2;
+  const schoolZ = 18.2;
+  const schoolCream = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.84 });
+  const schoolTrim = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.72 });
+  const schoolRoofMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.52, metalness: 0.25 });
+
+  // School courtyard compound wall & entrance gate
+  const courtPad = new THREE.Mesh(new THREE.BoxGeometry(14.0, 0.22, 17.5), concreteMat);
+  courtPad.position.set(schoolX - 1.5, 0.11, schoolZ);
+  courtPad.receiveShadow = true;
+  group.add(courtPad);
+
+  // Low front compound wall with open school gate
+  for (const wz of [-6.2, 6.2]) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 1.35, 5.2), schoolCream);
+    wall.position.set(halfW + 4.4, 0.78, schoolZ + wz);
+    group.add(wall);
+  }
+  // Gate pillars + overhead Govt School arch sign
+  for (const gz of [-3.4, 3.4]) {
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.55, 3.4, 0.55), schoolTrim);
+    pillar.position.set(halfW + 4.4, 1.7, schoolZ + gz);
+    group.add(pillar);
+  }
+  const schoolSignTex = createSignboardTexture(
+    'GOVT. SR. SEC. HILL SCHOOL',
+    'राजकीय वरिष्ठ माध्यमिक पाठशाला • SLOW ZONE',
+    '#1E3A8A',
+    '#FFFFFF',
+    '#FACC15',
+    maxAniso
+  );
+  const schoolSign = new THREE.Mesh(
+    new THREE.BoxGeometry(0.2, 1.15, 7.6),
+    new THREE.MeshStandardMaterial({ map: schoolSignTex, roughness: 0.38 })
+  );
+  schoolSign.position.set(halfW + 4.4, 3.7, schoolZ);
+  group.add(schoolSign);
+
+  // Two-storey Himalayan School Classroom Block
+  const schoolMain = new THREE.Mesh(new THREE.BoxGeometry(7.2, 6.2, 15.2), schoolCream);
+  schoolMain.position.set(schoolX + 1.8, 3.2, schoolZ);
+  schoolMain.castShadow = true;
+  schoolMain.receiveShadow = true;
+  group.add(schoolMain);
+
+  const schoolBand = new THREE.Mesh(new THREE.BoxGeometry(7.35, 0.45, 15.35), schoolTrim);
+  schoolBand.position.set(schoolX + 1.8, 3.25, schoolZ);
+  group.add(schoolBand);
+
+  const schoolRoof = new THREE.Mesh(new THREE.BoxGeometry(8.4, 0.35, 16.4), schoolRoofMat);
+  schoolRoof.position.set(schoolX + 1.6, 6.55, schoolZ);
+  schoolRoof.rotation.z = 0.14;
+  schoolRoof.castShadow = true;
+  group.add(schoolRoof);
+
+  for (const cy of [1.7, 4.6]) {
+    for (const cz of [-4.8, -1.6, 1.6, 4.8]) {
+      const cw = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.25, 1.9), shopWindowMat);
+      cw.position.set(schoolX - 1.84, cy, schoolZ + cz);
+      group.add(cw);
+    }
+  }
+
+  // Indian Tricolour Flagpole in School Courtyard
+  const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 6.4, 8), darkMetal);
+  flagPole.position.set(halfW + 7.2, 3.2, schoolZ);
+  group.add(flagPole);
+  const flagColors = [0xff9933, 0xffffff, 0x138808];
+  flagColors.forEach((col, fIdx) => {
+    const band = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04, 0.28, 1.35),
+      new THREE.MeshStandardMaterial({ color: col, roughness: 0.7 })
+    );
+    band.position.set(halfW + 7.2, 6.1 - fIdx * 0.28, schoolZ + 0.7);
+    group.add(band);
+  });
+
+  // Solid OBB collider for School Compound & Building
+  colliders.push(
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      schoolX + 1.2,
+      schoolZ,
+      4.4,
+      8.0,
+      `${id}-school`,
+      'Govt. Hill School Building',
+      'market'
+    ),
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      halfW + 4.4,
+      schoolZ - 6.2,
+      0.55,
+      2.8,
+      `${id}-school-wall-a`,
+      'School Compound Wall',
+      'market'
+    ),
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      halfW + 4.4,
+      schoolZ + 6.2,
+      0.55,
+      2.8,
+      `${id}-school-wall-b`,
+      'School Compound Wall',
+      'market'
+    )
+  );
+
+  // 4. Terraced Pahadi Residential Houses stacked on the hillside right behind the Market & School!
+  const terraceWall = new THREE.Mesh(new THREE.BoxGeometry(2.4, 6.0, 52.0), stoneMat);
+  terraceWall.position.set(halfW + 17.8, 2.2, -1.0);
+  group.add(terraceWall);
+
+  const houseSlots: Array<[number, number, number]> = [
+    [halfW + 20.8, 4.6, -21.0],
+    [halfW + 21.5, 5.2, -10.5],
+    [halfW + 20.6, 4.8, 0.5],
+    [halfW + 22.0, 5.6, 12.0],
+    [halfW + 21.2, 5.0, 23.0],
+  ];
+  houseSlots.forEach(([hx, hy, hz], hIdx) => {
+    const house = buildPahadiMountainHouse(title.length * 5 + hIdx * 11);
+    house.position.set(hx, hy, hz);
+    house.rotation.y = -Math.PI / 2;
+    group.add(house);
+  });
+
+  // Warm overhead market street light illuminating the Bazaar at night
+  const marketLight = new THREE.PointLight(0xffd28a, 0.5, 36);
+  marketLight.position.set(halfW + 6.5, 6.2, -6.0);
+  group.add(marketLight);
+
+  // 5. Parked local car & motorbike by the market shops (with colliders!)
+  const parkedCar = buildIndianTrafficVehicle('swift_car', title.length + 3);
+  parkedCar.group.position.set(halfW + 4.2, 0.06, -20.5);
+  parkedCar.group.rotation.y = 0.08;
+  group.add(parkedCar.group);
+  colliders.push(
+    makeLocalColliderOBB(
+      pos,
+      tan,
+      right,
+      halfW + 4.2,
+      -20.5,
+      parkedCar.halfWidth + 0.1,
+      parkedCar.halfLength + 0.1,
+      `${id}-parked-car`,
+      'Parked Market Car',
+      'market'
+    )
+  );
+
+  const parkedBike = buildIndianMotorcycleWithRider(title.length + 7);
+  parkedBike.riderGroup.visible = false;
+  parkedBike.group.position.set(halfW + 4.5, 0.06, -13.5);
+  parkedBike.group.rotation.y = 0.9;
+  group.add(parkedBike.group);
+
+  // 6. Bustling Hill Market Crowd (10 shoppers, shopkeepers & students walking around)
+  const crowdPts: Array<[number, number, number, number]> = [
+    [halfW + 5.0, -22.0, 0.85, 1.0],
+    [halfW + 4.8, -16.2, 1.15, 1.15],
+    [halfW + 5.2, -10.5, 0.95, 1.25],
+    [halfW + 4.9, -4.4, 1.1, 0.95],
+    [halfW + 5.3, 1.2, 0.8, 1.1],
+    [halfW + 5.1, 4.5, 1.0, 1.2],
+    [halfW + 6.4, 14.5, 1.2, 1.3],
+    [halfW + 6.8, 18.2, 1.35, 1.4],
+    [halfW + 6.2, 21.5, 1.0, 1.15],
+    [halfW + 8.5, 16.5, 1.1, 1.35],
+  ];
+  crowdPts.forEach(([cx, cz, radius, speed], idx) => {
+    const person = buildDhabaGuestPerson(idx * 13 + title.length * 3);
+    person.position.set(cx, 0.08, cz);
+    group.add(person);
+    crowd.push({
+      mesh: person,
+      baseX: cx,
+      baseZ: cz,
+      walkRadius: radius,
+      walkSpeed: speed,
+      phase: idx * 1.13,
+    });
+  });
+
+  return {
+    id,
+    title,
+    position: pos.clone(),
+    tangent: tan.clone(),
+    right,
+    group,
+    crowd,
+    nightLightMats,
+    marketLight,
+    colliders,
+  };
+}
+
+export function updateHillMarketTown(
+  market: HillMarketTownData,
+  _dt: number,
+  elapsed: number,
+  nightFactor: number
+): void {
+  const emissiveVal = 0.3 + nightFactor * 1.35;
+  for (const m of market.nightLightMats) {
+    m.emissiveIntensity = emissiveVal;
+  }
+  market.marketLight.intensity = 0.25 + nightFactor * 4.6;
+
+  for (const p of market.crowd) {
+    const a = elapsed * p.walkSpeed * 0.45 + p.phase;
+    const x = p.baseX + Math.cos(a) * p.walkRadius;
+    const z = p.baseZ + Math.sin(a * 0.85) * p.walkRadius;
+    const dx = -Math.sin(a) * p.walkRadius;
+    const dz = Math.cos(a * 0.85) * p.walkRadius * 0.85;
+    p.mesh.position.set(x, 0.08 + Math.abs(Math.sin(elapsed * 4.4 + p.phase)) * 0.04, z);
+    if (dx * dx + dz * dz > 0.001) {
+      p.mesh.rotation.y = Math.atan2(dx, dz);
+    }
+  }
+}
+
+/**
+ * Builds an authentic Small Roadside Pahadi Mandir (छोटा पहाड़ी मंदिर) seen along Himachal &
+ * Uttarakhand mountain highways — white & vermilion sanctum, tiered saffron Shikhara, golden
+ * Kalash, hanging brass bell, glowing diya flame, fluttering Mata flag, and solid OBB collider.
+ */
+export function buildSmallRoadsideMandir(
+  id: string,
+  pos: THREE.Vector3,
+  tan: THREE.Vector3,
+  right: THREE.Vector3,
+  onLeftSide: boolean,
+  offsetFromCenter: number
+): { group: THREE.Group; collider: StaticColliderOBB; flameMat: THREE.MeshBasicMaterial } {
+  const group = new THREE.Group();
+  const sideVec = onLeftSide ? right.clone().negate() : right.clone();
+  const worldPos = pos.clone().addScaledVector(sideVec, offsetFromCenter);
+  group.position.copy(worldPos);
+  // Face the shrine opening cleanly toward the highway centerline
+  group.lookAt(pos.clone().add(new THREE.Vector3(0, 0, 0)));
+
+  const stoneMat = new THREE.MeshStandardMaterial({ color: 0xd6cfc2, roughness: 0.9 });
+  const whiteWall = new THREE.MeshStandardMaterial({ color: 0xfffbeb, roughness: 0.78 });
+  const saffronMat = new THREE.MeshStandardMaterial({ color: 0xea580c, roughness: 0.62 });
+  const vermilionMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.68 });
+  const goldMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.22, metalness: 0.88 });
+  const flameMat = new THREE.MeshBasicMaterial({ color: 0xfde047 });
+
+  // 1. Grounded stone foundation plinth (extends slightly downward so it sits flush on hill slopes)
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.5, 3.2), stoneMat);
+  plinth.position.set(0, 0.05, 0);
+  plinth.receiveShadow = true;
+  group.add(plinth);
+
+  const topStep = new THREE.Mesh(new THREE.BoxGeometry(2.85, 0.26, 2.75), vermilionMat);
+  topStep.position.set(0, 0.88, 0.08);
+  group.add(topStep);
+
+  // 2. White & Vermilion miniature sanctum walls
+  const sanctum = new THREE.Mesh(new THREE.BoxGeometry(2.1, 1.95, 2.0), whiteWall);
+  sanctum.position.set(0, 1.96, -0.15);
+  sanctum.castShadow = true;
+  group.add(sanctum);
+
+  // Dark arched inner niche + glowing sacred Diya flame
+  const niche = new THREE.Mesh(
+    new THREE.BoxGeometry(0.95, 1.28, 0.16),
+    new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.9 })
+  );
+  niche.position.set(0, 1.68, 0.82);
+  group.add(niche);
+
+  const diya = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 8), flameMat);
+  diya.position.set(0, 1.28, 0.92);
+  group.add(diya);
+
+  // Front decorative red-orange pillars + hanging golden bell
+  for (const px of [-0.88, 0.88]) {
+    const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.09, 1.85, 8), saffronMat);
+    pillar.position.set(px, 1.9, 1.05);
+    group.add(pillar);
+  }
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.22, 0.26), vermilionMat);
+  beam.position.set(0, 2.86, 1.05);
+  group.add(beam);
+  const bell = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.18, 8), goldMat);
+  bell.position.set(0, 2.6, 1.05);
+  group.add(bell);
+
+  // 3. Tiered Saffron Shikhara Pinnacle + Golden Kalash + Fluttering Mata Flag (ध्वजा)
+  for (let t = 0; t < 3; t++) {
+    const w = 1.92 - t * 0.44;
+    const tier = new THREE.Mesh(new THREE.BoxGeometry(w, 0.52, w), t % 2 === 0 ? saffronMat : whiteWall);
+    tier.position.set(0, 3.16 + t * 0.5, -0.15);
+    tier.castShadow = true;
+    group.add(tier);
+  }
+  const kalash = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 10), goldMat);
+  kalash.position.set(0, 4.76, -0.15);
+  group.add(kalash);
+
+  const flagPole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.65, 6), goldMat);
+  flagPole.position.set(0, 5.55, -0.15);
+  group.add(flagPole);
+  const flag = new THREE.Mesh(
+    new THREE.ConeGeometry(0.28, 0.9, 3),
+    new THREE.MeshStandardMaterial({ color: 0xff5500, roughness: 0.65 })
+  );
+  flag.rotation.z = -Math.PI / 2;
+  flag.position.set(0.45, 6.1, -0.15);
+  group.add(flag);
+
+  const localX = onLeftSide ? offsetFromCenter : -offsetFromCenter;
+  const collider = makeLocalColliderOBB(
+    pos,
+    tan,
+    right,
+    localX,
+    0,
+    1.85,
+    1.8,
+    id,
+    'Roadside Hill Mandir',
+    'mandir'
+  );
+
+  return { group, collider, flameMat };
+}
+
+export interface HighAltitudeCloudHandle {
+  group: THREE.Group;
+  updateClouds: (dt: number, elapsed: number, timeOfDayHours: number, weather: WeatherPreset) => void;
+}
+
+/**
+ * Builds volumetric-style composite 3D High-Altitude Himalayan Clouds & Valley Mist Banks
+ * that float over high peaks AND drift gracefully along elevated mountain roads!
+ */
+export function buildHighAltitudeClouds(
+  anchors: Array<{ pos: THREE.Vector3; right: THREE.Vector3; lowValley?: boolean; scale?: number }>,
+  seed = 1
+): HighAltitudeCloudHandle {
+  const group = new THREE.Group();
+  const puffGeo = new THREE.SphereGeometry(1, 10, 8);
+  const cloudMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.95,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false,
+  });
+
+  const clouds: Array<{ mesh: THREE.Group; baseX: number; baseY: number; baseZ: number; driftSpeed: number; phase: number }> = [];
+
+  anchors.forEach((a, idx) => {
+    const cg = new THREE.Group();
+    const sc = a.scale ?? (1.0 + ((idx * 17 + seed) % 10) * 0.14);
+    const puffSpecs: Array<[number, number, number, number, number, number]> = [
+      [0, 0, 0, 12.5, 4.6, 8.8],
+      [-9.5, -0.6, 2.2, 9.2, 3.8, 7.2],
+      [9.8, -0.4, -1.8, 9.8, 4.1, 7.6],
+      [-3.5, 2.4, -2.5, 8.6, 4.0, 6.8],
+      [4.2, 2.1, 2.4, 7.8, 3.6, 6.4],
+    ];
+    for (const [px, py, pz, sx, sy, sz] of puffSpecs) {
+      const puff = new THREE.Mesh(puffGeo, cloudMat);
+      puff.position.set(px * sc, py * sc, pz * sc);
+      puff.scale.set(sx * sc, sy * sc, sz * sc);
+      cg.add(puff);
+    }
+
+    const latSpread = a.lowValley
+      ? 24 + ((idx * 19) % 36)
+      : ((idx % 2 === 0 ? 1 : -1) * (18 + ((idx * 23) % 75)));
+    const yLift = a.lowValley ? -2 + ((idx * 7) % 11) : 26 + ((idx * 13) % 38);
+    const cx = a.pos.x + a.right.x * latSpread;
+    const cy = a.pos.y + yLift;
+    const cz = a.pos.z + a.right.z * latSpread;
+    cg.position.set(cx, cy, cz);
+    cg.rotation.y = ((idx * 1.37 + seed) % (Math.PI * 2));
+    group.add(cg);
+
+    clouds.push({
+      mesh: cg,
+      baseX: cx,
+      baseY: cy,
+      baseZ: cz,
+      driftSpeed: 0.14 + (idx % 5) * 0.045,
+      phase: idx * 1.7 + seed,
+    });
+  });
+
+  const cDay = new THREE.Color(0xf8fafc);
+  const cSunset = new THREE.Color(0xffbfa0);
+  const cNight = new THREE.Color(0x283a56);
+  const cRain = new THREE.Color(0x94a3b8);
+  const cMix = new THREE.Color();
+
+  const updateClouds = (_dt: number, elapsed: number, timeOfDayHours: number, weather: WeatherPreset) => {
+    const h = ((timeOfDayHours % 24) + 24) % 24;
+    const sunAngle = ((h - 6) / 12) * Math.PI;
+    const sunElev = Math.sin(sunAngle);
+    const nightWeight = 1 - THREE.MathUtils.clamp((sunElev + 0.14) / 0.52, 0, 1);
+    const sunsetWarmth = Math.exp(-Math.pow((sunElev - 0.08) / 0.22, 2));
+
+    cMix.copy(weather === 'rain' ? cRain : cDay);
+    if (sunsetWarmth > 0.15 && weather !== 'rain') {
+      cMix.lerp(cSunset, sunsetWarmth * 0.65);
+    }
+    cMix.lerp(cNight, nightWeight * 0.85);
+    cloudMat.color.copy(cMix);
+    cloudMat.opacity =
+      weather === 'mist'
+        ? 0.82
+        : weather === 'rain'
+          ? 0.78
+          : THREE.MathUtils.lerp(0.68, 0.34, nightWeight);
+
+    for (const c of clouds) {
+      c.mesh.position.x = c.baseX + Math.sin(elapsed * c.driftSpeed + c.phase) * 14.0;
+      c.mesh.position.y = c.baseY + Math.cos(elapsed * c.driftSpeed * 0.7 + c.phase) * 1.4;
+      c.mesh.position.z = c.baseZ + Math.cos(elapsed * c.driftSpeed * 0.6 + c.phase) * 9.0;
+    }
+  };
+
+  return { group, updateClouds };
+}
+
 
