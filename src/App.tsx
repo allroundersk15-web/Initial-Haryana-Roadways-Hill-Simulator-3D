@@ -8,6 +8,8 @@ import {
   Infinity as InfinityIcon,
   LogIn,
   Map as MapIcon,
+  Maximize2,
+  Minimize2,
   Play,
   Store,
   UserCheck,
@@ -19,6 +21,7 @@ import { GoogleMapsDispatch } from './components/GoogleMapsDispatch';
 import { TrainingSelectView } from './components/TrainingSelectView';
 import { getBusSpecById } from './data/buses';
 import { CAREER_ROUTES, LICENSE_TRACKS, getRouteById, getTrackById } from './data/routes';
+import { useFullscreen } from './hooks/useFullscreen';
 import {
   ensureDriverProfile,
   recordCompletedTrip,
@@ -110,6 +113,10 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   brakeActive: 0,
   shiftHint: null,
   autoRange: 'D',
+  nearLandslideId: null,
+  nearLandslideLabel: null,
+  landslideClearing: false,
+  landslideClearPct: 0,
   training: null,
 };
 
@@ -129,12 +136,29 @@ export default function App() {
   const [quotaExceeded, setQuotaExceeded] = useState(false);
 
   const controllerRef = useRef<BusSimController | null>(null);
+  const { isFullscreen, toggleFullscreen } = useFullscreen();
 
   useEffect(() => {
     const onQuota = () => setQuotaExceeded(true);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (view !== 'driving' && e.code === 'KeyF' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        void toggleFullscreen();
+      }
+    };
     window.addEventListener('gmp-quota-exceeded', onQuota);
-    return () => window.removeEventListener('gmp-quota-exceeded', onQuota);
-  }, []);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('gmp-quota-exceeded', onQuota);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [toggleFullscreen, view]);
 
   useEffect(() => {
     let unsubProfile: (() => void) | null = null;
@@ -470,8 +494,23 @@ export default function App() {
             </button>
           </nav>
 
-          {/* Auth / Cloud Driver Action */}
+          {/* Auth / Cloud Driver Action + Menu-Only Glassy Fullscreen Button */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void toggleFullscreen()}
+              title={isFullscreen ? 'Exit Fullscreen (F)' : 'Fullscreen Mode (F)'}
+              aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              className={`hud-compact inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                isFullscreen
+                  ? 'bg-sky-500/35 border-sky-300/60 text-white'
+                  : 'text-slate-100 hover:bg-white/15 hover:text-white'
+              }`}
+            >
+              {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 text-sky-200" /> : <Maximize2 className="w-3.5 h-3.5 text-sky-300" />}
+              <span className="hidden lg:inline">{isFullscreen ? 'Exit Full' : 'Fullscreen'}</span>
+            </button>
+
             {authUser ? (
               <button
                 type="button"
@@ -606,6 +645,15 @@ export default function App() {
                 <Compass className="w-4 h-4 text-sky-400" />
                 Routes ({CAREER_ROUTES.length})
               </button>
+
+              <button
+                type="button"
+                onClick={() => void toggleFullscreen()}
+                className="hud-compact inline-flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-white hover:bg-white/20 text-sm font-semibold transition-all whitespace-nowrap cursor-pointer"
+              >
+                {isFullscreen ? <Minimize2 className="w-4 h-4 text-sky-300" /> : <Maximize2 className="w-4 h-4 text-sky-300" />}
+                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+              </button>
             </div>
 
             <div className="mt-4 pt-3 border-t border-white/15 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-300">
@@ -620,7 +668,7 @@ export default function App() {
         </div>
       )}
 
-      {/* LIVE DRIVING COCKPIT HUD */}
+      {/* LIVE DRIVING COCKPIT HUD (No fullscreen button in gameplay) */}
       {view === 'driving' && (
         <CockpitHud
           mode={simMode}

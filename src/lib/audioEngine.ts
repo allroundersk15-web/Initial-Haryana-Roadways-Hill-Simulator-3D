@@ -1,10 +1,38 @@
 /**
- * 100% Procedural Web Audio Synthesizer for Haryana Roadways BS6 Bus Acoustics:
+ * 100% Procedural Web Audio Synthesizer + Authentic Hindi Crowd Voices for Indian Roadways Bus:
  * - Dynamic diesel engine thrum + turbo whine linked to RPM & load
- * - Iconic Indian Multi-Tone Melody Pressure Horn ("Dhoom / Punjabi Roadways Melody")
- * - Heavy Dual-Trumpet Mountain Air Horn (blind hairpin warning)
- * - Pneumatic door air hiss + air brake psshh + conductor double brass bell + indicator relay
+ * - Iconic Indian Multi-Tone Melody Pressure Horn & Heavy Dual-Trumpet Air Horn
+ * - Pneumatic door air hiss + conductor double brass bell + gear clunk + indicator relay
+ * - Warm bus-cabin & bus-stop crowd chatter murmur + natural spoken Hindi passenger/conductor voices
+ * - Landslide rock-clearing excavator rumble SFX
  */
+export type CrowdChatterContext = 'bus_stop' | 'onboard' | 'landslide';
+
+const HINDI_CROWD_LINES: Record<CrowdChatterContext, string[]> = {
+  bus_stop: [
+    'अरे भैया, बस आ गई, जल्दी चढ़ो!',
+    'टिकट ले लो, टिकट ले लो, आगे आ जाओ!',
+    'थोड़ा अंदर खिसको भाई साहब, पीछे जगह दो!',
+    'ड्राइवर साहब, दो मिनट रुकना, सामान रख रहे हैं!',
+    'अरे आराम से चढ़ो, सबको सीट मिल जाएगी!',
+    'कंडक्टर भैया, दो टिकट आगे के देना!',
+    'चलो भैया चलो, दरवाजा बंद होने वाला है!',
+  ],
+  onboard: [
+    'भाई साहब, थोड़ी खिड़की खोल देना, पहाड़ की हवा आने दो!',
+    'वाह, हिमाचल के पहाड़ कितने सुंदर लग रहे हैं!',
+    'अगला स्टॉप ढाबा आएगा ना? गरमा-गरम चाय पीनी है!',
+    'आराम से बैठो, आगे पहाड़ी मोड़ आ रहा है!',
+    'बहुत बढ़िया बस चला रहे हैं ड्राइवर साहब!',
+    'कंडक्टर साहब, अगला बस अड्डा कितनी दूर है?',
+  ],
+  landslide: [
+    'अरे आगे पहाड़ से पत्थर गिरे हैं, एक तरफ से धीरे निकालो!',
+    'भाई साहब, आगे लैंडस्लाइड है, रास्ता साफ करवा कर चलो!',
+    'ट्रैफिक धीरे-धीरे निकल रहा है, ध्यान से चलाना!',
+  ],
+};
+
 export class IndianBusAudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -19,14 +47,42 @@ export class IndianBusAudioEngine {
   private airHornOsc2: OscillatorNode | null = null;
   private airHornGain: GainNode | null = null;
 
+  // Continuous low-level crowd chatter murmur bed (vocal formant filtered noise)
+  private crowdSource: AudioBufferSourceNode | null = null;
+  private crowdGain: GainNode | null = null;
+  private crowdFilter1: BiquadFilterNode | null = null;
+  private crowdFilter2: BiquadFilterNode | null = null;
+
   private melodyTimer: number | null = null;
   private melodyStep = 0;
   private melodyActive = false;
   private muted = false;
   private started = false;
 
+  private lastSpeechAtMs = 0;
+  private speechLineCursor: Record<CrowdChatterContext, number> = {
+    bus_stop: 0,
+    onboard: 0,
+    landslide: 0,
+  };
+  private cachedHindiVoice: SpeechSynthesisVoice | null = null;
+
   // Classic Indian highway multi-tone musical pressure horn sequence (Hz)
   private readonly melodyNotes = [523.25, 659.25, 783.99, 659.25, 880.0, 783.99, 659.25, 587.33];
+
+  private pickHindiVoice(): SpeechSynthesisVoice | null {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return null;
+    if (this.cachedHindiVoice) return this.cachedHindiVoice;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return null;
+    const hiVoice =
+      voices.find((v) => /hi[-_]?IN/i.test(v.lang)) ||
+      voices.find((v) => /hindi/i.test(v.name)) ||
+      voices.find((v) => /en[-_]?IN/i.test(v.lang)) ||
+      null;
+    this.cachedHindiVoice = hiVoice;
+    return hiVoice;
+  }
 
   public init(): void {
     if (this.started) {
@@ -36,7 +92,9 @@ export class IndianBusAudioEngine {
       return;
     }
     try {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
 
       this.masterGain = this.ctx.createGain();
@@ -85,23 +143,63 @@ export class IndianBusAudioEngine {
 
       this.airHornOsc1 = this.ctx.createOscillator();
       this.airHornOsc1.type = 'sawtooth';
-      this.airHornOsc1.frequency.value = 311.13; // Eb4
+      this.airHornOsc1.frequency.value = 311.13;
 
       this.airHornOsc2 = this.ctx.createOscillator();
       this.airHornOsc2.type = 'sawtooth';
-      this.airHornOsc2.frequency.value = 392.0; // G4 (classic Indian truck/bus interval)
+      this.airHornOsc2.frequency.value = 392.0;
 
       this.airHornOsc1.connect(airHornFilter);
       this.airHornOsc2.connect(airHornFilter);
       airHornFilter.connect(this.airHornGain);
       this.airHornGain.connect(this.masterGain);
 
+      // Warm Procedural Crowd Chatter Murmur Loop (bandpass vocal formants + organic syllable modulation)
+      const crowdLen = Math.floor(this.ctx.sampleRate * 3.0);
+      const crowdBuf = this.ctx.createBuffer(1, crowdLen, this.ctx.sampleRate);
+      const cData = crowdBuf.getChannelData(0);
+      for (let i = 0; i < crowdLen; i++) {
+        const t = i / this.ctx.sampleRate;
+        // Organic multi-speaker syllable envelope modulation
+        const mod =
+          0.45 +
+          0.25 * Math.sin(t * 21.0) +
+          0.18 * Math.sin(t * 37.3 + 1.2) +
+          0.12 * Math.cos(t * 13.7);
+        cData[i] = (Math.random() * 2 - 1) * mod;
+      }
+      this.crowdSource = this.ctx.createBufferSource();
+      this.crowdSource.buffer = crowdBuf;
+      this.crowdSource.loop = true;
+
+      this.crowdFilter1 = this.ctx.createBiquadFilter();
+      this.crowdFilter1.type = 'bandpass';
+      this.crowdFilter1.frequency.value = 520;
+      this.crowdFilter1.Q.value = 2.2;
+
+      this.crowdFilter2 = this.ctx.createBiquadFilter();
+      this.crowdFilter2.type = 'bandpass';
+      this.crowdFilter2.frequency.value = 1180;
+      this.crowdFilter2.Q.value = 2.6;
+
+      this.crowdGain = this.ctx.createGain();
+      this.crowdGain.gain.value = 0;
+
+      this.crowdSource.connect(this.crowdFilter1);
+      this.crowdSource.connect(this.crowdFilter2);
+      this.crowdFilter1.connect(this.crowdGain);
+      this.crowdFilter2.connect(this.crowdGain);
+      this.crowdGain.connect(this.masterGain);
+
       this.engineOsc1.start();
       this.engineOsc2.start();
       this.turboOsc.start();
       this.airHornOsc1.start();
       this.airHornOsc2.start();
+      this.crowdSource.start();
 
+      // Warm up Hindi voice discovery
+      this.pickHindiVoice();
       this.started = true;
     } catch {
       // AudioContext unavailable in restricted environments
@@ -113,14 +211,75 @@ export class IndianBusAudioEngine {
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(mute ? 0 : 0.48, this.ctx.currentTime, 0.05);
     }
+    if (mute && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore
+      }
+    }
   }
 
   public isMuted(): boolean {
     return this.muted;
   }
 
+  /**
+   * Scales warm ambient passenger / bus-stop crowd murmur dynamically (0..1).
+   */
+  public updateCrowdAmbience(intensity: number, elapsedSec: number): void {
+    if (!this.started || !this.ctx || !this.crowdGain || !this.crowdFilter1) return;
+    const clamped = Math.max(0, Math.min(1, intensity));
+    const now = this.ctx.currentTime;
+    this.crowdGain.gain.setTargetAtTime(this.muted ? 0 : clamped * 0.16, now, 0.25);
+    // Gently shift vocal formant so crowd chatter sounds organic and alive
+    this.crowdFilter1.frequency.setTargetAtTime(480 + Math.sin(elapsedSec * 1.9) * 95, now, 0.2);
+  }
+
+  /**
+   * Speaks an authentic Hindi passenger/conductor crowd line when near people at a bus stand,
+   * onboard with passengers, or encountering a mountain landslide jam (cooldown-throttled).
+   */
+  public triggerHindiCrowdVoice(context: CrowdChatterContext, minIntervalMs = 11500): void {
+    if (this.muted || !this.started) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    const now = Date.now();
+    if (now - this.lastSpeechAtMs < minIntervalMs) return;
+    if (window.speechSynthesis.speaking) return;
+
+    const lines = HINDI_CROWD_LINES[context];
+    const idx = this.speechLineCursor[context] % lines.length;
+    this.speechLineCursor[context] = idx + 1;
+    const phrase = lines[idx];
+
+    try {
+      const utter = new SpeechSynthesisUtterance(phrase);
+      utter.lang = 'hi-IN';
+      const voice = this.pickHindiVoice();
+      if (voice) {
+        utter.voice = voice;
+      }
+      utter.volume = context === 'bus_stop' ? 0.62 : 0.46;
+      utter.rate = 0.96 + (idx % 3) * 0.06;
+      utter.pitch = 0.88 + (idx % 4) * 0.1;
+      this.lastSpeechAtMs = now;
+      window.speechSynthesis.speak(utter);
+    } catch {
+      // Speech synthesis blocked or unavailable — murmur bed still plays cleanly
+    }
+  }
+
   public updateEngine(rpm: number, throttle: number, active: boolean): void {
-    if (!this.started || !this.ctx || !this.engineOsc1 || !this.engineOsc2 || !this.engineFilter || !this.engineGain || !this.turboOsc || !this.turboGain) {
+    if (
+      !this.started ||
+      !this.ctx ||
+      !this.engineOsc1 ||
+      !this.engineOsc2 ||
+      !this.engineFilter ||
+      !this.engineGain ||
+      !this.turboOsc ||
+      !this.turboGain
+    ) {
       return;
     }
     const now = this.ctx.currentTime;
@@ -132,7 +291,11 @@ export class IndianBusAudioEngine {
     this.engineGain.gain.setTargetAtTime(active ? 0.14 + throttle * 0.12 : 0.02, now, 0.1);
 
     this.turboOsc.frequency.setTargetAtTime(880 + normRpm * 1450, now, 0.12);
-    this.turboGain.gain.setTargetAtTime(active ? Math.max(0, normRpm - 0.35) * 0.028 * throttle : 0, now, 0.15);
+    this.turboGain.gain.setTargetAtTime(
+      active ? Math.max(0, normRpm - 0.35) * 0.028 * throttle : 0,
+      now,
+      0.15
+    );
   }
 
   public setAirHorn(on: boolean): void {
@@ -221,6 +384,37 @@ export class IndianBusAudioEngine {
     noise.start(now);
   }
 
+  /**
+   * Deep gravel/boulder rumble & hydraulic scoop sound when manually clearing a road landslide.
+   */
+  public playRockClear(durationSec = 0.95): void {
+    this.init();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const sampleCount = Math.floor(this.ctx.sampleRate * durationSec);
+    const buffer = this.ctx.createBuffer(1, sampleCount, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      const env = Math.sin((i / sampleCount) * Math.PI);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(340, now);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.32, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    noise.start(now);
+  }
+
   public playConductorBell(): void {
     this.init();
     if (!this.ctx || !this.masterGain || this.muted) return;
@@ -289,7 +483,6 @@ export class IndianBusAudioEngine {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
 
-    // Mechanical synchromesh detent clunk
     const clunk = this.ctx.createOscillator();
     const clunkGain = this.ctx.createGain();
     clunk.type = 'triangle';
@@ -302,7 +495,6 @@ export class IndianBusAudioEngine {
     clunk.start(now);
     clunk.stop(now + 0.08);
 
-    // Metallic latch tick
     const tick = this.ctx.createOscillator();
     const tickGain = this.ctx.createGain();
     tick.type = 'square';
@@ -318,6 +510,13 @@ export class IndianBusAudioEngine {
   public dispose(): void {
     this.setMelodyHorn(false);
     this.setAirHorn(false);
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore
+      }
+    }
     if (this.ctx) {
       void this.ctx.close();
       this.ctx = null;

@@ -168,6 +168,10 @@ export interface TelemetrySnapshot {
   shiftHint: 'up' | 'down' | null;
   autoRange: 'D' | 'N' | 'R';
   endlessBiome: EndlessBiome | null;
+  nearLandslideId: string | null;
+  nearLandslideLabel: string | null;
+  landslideClearing: boolean;
+  landslideClearPct: number;
   training: TrainingLiveState | null;
 }
 

@@ -4,7 +4,9 @@ import {
   buildCurvedMountainTunnel,
   buildIndianTrafficVehicle,
   buildPahadiMountainHouse,
+  buildRoadLandslideZone,
   createHighDetailAsphaltTexture,
+  type LandslideZoneData,
   type TrafficKind,
 } from './sceneryAndTraffic';
 
@@ -40,6 +42,7 @@ interface EndlessChunk {
   endS: number;
   group: THREE.Group;
   samples: EndlessSamplePoint[];
+  landslide: LandslideZoneData | null;
 }
 
 export interface EndlessWorldHandle {
@@ -49,6 +52,7 @@ export interface EndlessWorldHandle {
   rainSystem: THREE.Points;
   startPos: THREE.Vector3;
   startHeading: number;
+  getLandslides: () => LandslideZoneData[];
   sampleRoadAt: (pos: THREE.Vector3) => {
     sMeters: number;
     point: THREE.Vector3;
@@ -536,8 +540,26 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       group.add(tunnel);
     }
 
+    // Random Half-Road Mountain / Foothill Landslide (~45% of non-tunnel hill chunks)
+    let landslide: LandslideZoneData | null = null;
+    if (biome !== 'plains' && !hasMountainTunnel && idx > 0 && Math.random() < 0.48) {
+      const lsT = 0.32 + Math.random() * 0.36;
+      const lsPos = curve.getPointAt(lsT);
+      const lsTan = curve.getTangentAt(lsT).normalize();
+      const builtLs = buildRoadLandslideZone(
+        `endless-ls-${idx}`,
+        biome === 'mountain' ? 'Himalayan Rockfall Slide' : 'Shivalik Hill Landslide',
+        lsPos,
+        lsTan,
+        roadWidth,
+        maxAniso
+      );
+      group.add(builtLs.group);
+      landslide = builtLs.data;
+    }
+
     root.add(group);
-    return { index: idx, biome, startS, endS, group, samples };
+    return { index: idx, biome, startS, endS, group, samples, landslide };
   };
 
   // Bootstrap initial 4 seamless highway chunks (~2,100m ahead)
@@ -662,9 +684,17 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     };
   }
 
+  function getLandslides(): LandslideZoneData[] {
+    const list: LandslideZoneData[] = [];
+    for (const ch of chunks) {
+      if (ch.landslide) list.push(ch.landslide);
+    }
+    return list;
+  }
+
   function updateWorld(
     dt: number,
-    _elapsed: number,
+    elapsed: number,
     busPos: THREE.Vector3,
     _busHeading: number,
     _busSpeedMs: number,
@@ -680,6 +710,28 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const old = chunks.shift()!;
       root.remove(old.group);
       disposeObject(old.group);
+    }
+
+    const activeLandslides = getLandslides();
+    for (const ls of activeLandslides) {
+      if (ls.cleared) {
+        ls.beaconLightMat.color.setHex(0x22c55e);
+        ls.jcbBoomPivot.rotation.x = THREE.MathUtils.damp(ls.jcbBoomPivot.rotation.x, 0, 4, dt);
+        continue;
+      }
+      ls.beaconLightMat.color.setHex(Math.sin(elapsed * 9) > 0 ? 0xfacc15 : 0x78350f);
+      if (ls.clearing) {
+        ls.clearProgress = Math.min(1, ls.clearProgress + dt / 2.8);
+        ls.jcbBoomPivot.rotation.x = -0.35 + Math.sin(elapsed * 7.5) * 0.32;
+        const remain = Math.max(0.01, 1 - ls.clearProgress);
+        ls.debrisGroup.scale.set(1, remain, 1);
+        ls.debrisGroup.position.y = -ls.clearProgress * 0.85;
+        if (ls.clearProgress >= 1) {
+          ls.cleared = true;
+          ls.clearing = false;
+          ls.debrisGroup.visible = false;
+        }
+      }
     }
 
     const minS = chunks[0].startS + 18;
@@ -721,6 +773,35 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       } else if (v.yieldStopTimer > 0) {
         v.yieldStopTimer = Math.max(0, v.yieldStopTimer - dt);
         targetSpeedMult = 0.25;
+      }
+
+      // Landslide single-lane traffic queuing & slow pass
+      for (const ls of activeLandslides) {
+        if (ls.cleared) continue;
+        const ldx = v.mesh.position.x - ls.position.x;
+        const ldz = v.mesh.position.z - ls.position.z;
+        if (Math.hypot(ldx, ldz) < 36) {
+          const alongLs = ldx * ls.tangent.x + ldz * ls.tangent.z;
+          const approaching = v.direction === 1 ? alongLs < 10 && alongLs > -34 : alongLs > -10 && alongLs < 34;
+          if (approaching) {
+            if (v.direction === 1) {
+              const busNearLs = busPos.distanceTo(ls.position) < 28;
+              if (busNearLs && alongLs < -6) {
+                targetSpeedMult = 0.0;
+                braking = true;
+              } else {
+                targetLaneOffset = 2.35;
+                targetSpeedMult = Math.min(targetSpeedMult, 0.34);
+                braking = true;
+              }
+            } else {
+              const busNearLs = busPos.distanceTo(ls.position) < 24;
+              targetLaneOffset = 3.15;
+              targetSpeedMult = Math.min(targetSpeedMult, busNearLs && alongLs > 8 ? 0.0 : 0.42);
+              braking = true;
+            }
+          }
+        }
       }
 
       if (hornBlowing && Math.hypot(relX, relZ) < 32) {
@@ -795,6 +876,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     rainSystem,
     startPos,
     startHeading,
+    getLandslides,
     sampleRoadAt,
     updateWorld,
     dispose,

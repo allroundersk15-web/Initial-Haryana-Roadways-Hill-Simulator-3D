@@ -5,8 +5,10 @@ import {
   buildIndianTrafficVehicle,
   buildNhaiTollPlaza,
   buildPahadiMountainHouse,
+  buildRoadLandslideZone,
   createHighDetailAsphaltTexture,
   createSignboardTexture,
+  type LandslideZoneData,
   type TollPlazaData,
   type TrafficKind,
 } from './sceneryAndTraffic';
@@ -55,6 +57,7 @@ export interface HimachalWorldHandle {
   roadWidth: number;
   stops: StopZoneData[];
   tolls: TollPlazaData[];
+  landslides: LandslideZoneData[];
   passengers: PassengerActor[];
   traffic: TrafficVehicle[];
   rainSystem: THREE.Points;
@@ -842,6 +845,42 @@ export function buildHimachalMountainWorld(
     tolls.push(built.data);
   }
 
+  // 9b. Random Himalayan Half-Road Landslides (2 zones per route avoiding stops, tunnels, and tolls)
+  const landslides: LandslideZoneData[] = [];
+  const candidateBands: Array<[number, number, string]> = [
+    [0.14, 0.21, 'Kalka-Parwanoo Slope Slide'],
+    [0.45, 0.56, 'Mid-Ghat Rockfall Zone'],
+    [0.83, 0.89, 'High Pass Boulder Slide'],
+  ];
+  // Randomly pick 2 out of 3 highway bands + random t inside each band
+  const pickedIndices = [0, 1, 2].sort(() => Math.random() - 0.5).slice(0, 2).sort((a, b) => a - b);
+  for (const bandIdx of pickedIndices) {
+    const [bMin, bMax, label] = candidateBands[bandIdx];
+    let chosenT = bMin + Math.random() * (bMax - bMin);
+    // Ensure clear separation from stops, tunnels, and toll plazas
+    const isBlocked = (tVal: number) =>
+      route.stops.some((s) => Math.abs(s.progressT - tVal) < 0.048) ||
+      tunnelRanges.some((tn) => tVal >= tn.start - 0.03 && tVal <= tn.end + 0.03) ||
+      tollSpecs.some((tl) => Math.abs(tl.t - tVal) < 0.04);
+    for (let tries = 0; tries < 8 && isBlocked(chosenT); tries++) {
+      chosenT = bMin + ((tries + 0.5) / 8) * (bMax - bMin);
+    }
+    if (!isBlocked(chosenT)) {
+      const pt = curve.getPointAt(chosenT);
+      const tan = curve.getTangentAt(chosenT).normalize();
+      const builtLs = buildRoadLandslideZone(
+        `${route.id}-ls-${bandIdx}`,
+        label,
+        pt,
+        tan,
+        roadWidth,
+        maxAniso
+      );
+      root.add(builtLs.group);
+      landslides.push(builtLs.data);
+    }
+  }
+
   // 10. Route Landmarks (Bus Stands, Dhabas, Markets, Pahadi Mandirs) + Waiting Crowds + Stop Bays
   const stops: StopZoneData[] = [];
   const passengers: PassengerActor[] = [];
@@ -1058,6 +1097,29 @@ export function buildHimachalMountainWorld(
       tl.barrierPivot.rotation.z = tl.barrierOpenAnim * (Math.PI * 0.44);
     }
 
+    // Animate Landslide JCB Beacons & Manual Rock-Clearing Scoop Progress
+    for (const ls of landslides) {
+      if (ls.cleared) {
+        ls.beaconLightMat.color.setHex(0x22c55e);
+        ls.jcbBoomPivot.rotation.x = THREE.MathUtils.damp(ls.jcbBoomPivot.rotation.x, 0, 4, dt);
+        continue;
+      }
+      // Flash amber warning beacon on JCB cab
+      ls.beaconLightMat.color.setHex(Math.sin(elapsed * 9) > 0 ? 0xfacc15 : 0x78350f);
+      if (ls.clearing) {
+        ls.clearProgress = Math.min(1, ls.clearProgress + dt / 2.8);
+        ls.jcbBoomPivot.rotation.x = -0.35 + Math.sin(elapsed * 7.5) * 0.32;
+        const remain = Math.max(0.01, 1 - ls.clearProgress);
+        ls.debrisGroup.scale.set(1, remain, 1);
+        ls.debrisGroup.position.y = -ls.clearProgress * 0.85;
+        if (ls.clearProgress >= 1) {
+          ls.cleared = true;
+          ls.clearing = false;
+          ls.debrisGroup.visible = false;
+        }
+      }
+    }
+
     // Animate waiting & boarding 3D crowd passengers
     for (const p of passengers) {
       if (p.boarded) continue;
@@ -1122,6 +1184,38 @@ export function buildHimachalMountainWorld(
       } else if (v.yieldStopTimer > 0) {
         v.yieldStopTimer = Math.max(0, v.yieldStopTimer - dt);
         targetSpeedMult = 0.25;
+      }
+
+      // Landslide bottleneck traffic behavior: traffic slows/queues around uncleared half-road debris!
+      for (const ls of landslides) {
+        if (ls.cleared) continue;
+        const ldx = v.mesh.position.x - ls.position.x;
+        const ldz = v.mesh.position.z - ls.position.z;
+        const distLs = Math.hypot(ldx, ldz);
+        if (distLs < 36) {
+          const alongLs = ldx * ls.tangent.x + ldz * ls.tangent.z;
+          const approaching = v.direction === 1 ? alongLs < 10 && alongLs > -34 : alongLs > -10 && alongLs < 34;
+          if (approaching) {
+            if (v.direction === 1) {
+              // Forward lane is blocked by boulders — wait or carefully merge onto open right half (+2.35)
+              const busNearLs = busPos.distanceTo(ls.position) < 28;
+              if (busNearLs && alongLs < -6) {
+                targetSpeedMult = 0.0;
+                braking = true;
+              } else {
+                targetLaneOffset = 2.35;
+                targetSpeedMult = Math.min(targetSpeedMult, 0.34);
+                braking = true;
+              }
+            } else {
+              // Oncoming vehicle on open half-lane slows cautiously past landslide & yields if bus is squeezing past
+              const busNearLs = busPos.distanceTo(ls.position) < 24;
+              targetLaneOffset = 3.15;
+              targetSpeedMult = Math.min(targetSpeedMult, busNearLs && alongLs > 8 ? 0.0 : 0.42);
+              braking = true;
+            }
+          }
+        }
       }
 
       // Optional player horn courtesy nudge (never required, never slows player bus)
@@ -1205,6 +1299,7 @@ export function buildHimachalMountainWorld(
     roadWidth,
     stops,
     tolls,
+    landslides,
     passengers,
     traffic,
     rainSystem,

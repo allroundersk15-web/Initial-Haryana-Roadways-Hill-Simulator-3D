@@ -881,3 +881,188 @@ export function buildNhaiTollPlaza(
     },
   };
 }
+
+export interface LandslideZoneData {
+  id: string;
+  label: string;
+  position: THREE.Vector3; // Road centerline position
+  blockCenter: THREE.Vector3; // Center of the blocked half-road boulder pile
+  tangent: THREE.Vector3;
+  right: THREE.Vector3;
+  halfWidth: number;
+  halfLength: number;
+  debrisGroup: THREE.Group;
+  jcbBoomPivot: THREE.Group;
+  beaconLightMat: THREE.MeshBasicMaterial;
+  clearing: boolean;
+  clearProgress: number; // 0 = blocked half-road, 1 = fully cleared
+  cleared: boolean;
+}
+
+/**
+ * Builds a realistic Himalayan Half-Road Landslide Zone:
+ * - Covers the uphill LEFT half of the highway (+left = -right) with rocky boulders, mud scree & fallen timber
+ * - Leaves the outer RIGHT half-lane open for tight single-lane passing
+ * - Includes warning cones, BRO landslide board, and a yellow JCB road-clearing loader with animated scoop
+ *   so the driver can manually clear the blockage!
+ */
+export function buildRoadLandslideZone(
+  id: string,
+  label: string,
+  pos: THREE.Vector3,
+  tan: THREE.Vector3,
+  roadWidth: number,
+  maxAniso: number
+): { group: THREE.Group; data: LandslideZoneData } {
+  const group = new THREE.Group();
+  group.position.copy(pos);
+  group.lookAt(pos.clone().add(tan));
+
+  const upVec = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+  const left = right.clone().negate();
+  const halfW = roadWidth * 0.5;
+
+  // In local lookAt space (+Z = forward along tan, +X = LEFT uphill cliff side, -X = RIGHT valley open lane)
+  const debrisGroup = new THREE.Group();
+  group.add(debrisGroup);
+
+  const rockMatDark = new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.95 });
+  const rockMatMud = new THREE.MeshStandardMaterial({ color: 0x6b5b49, roughness: 0.96 });
+  const rockMatLight = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.92 });
+  const woodMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.9 });
+
+  // Mud & gravel landslide scree mound spilling from hillside across left half of road (X from +0.2 to +halfW+2.8)
+  const mound = new THREE.Mesh(new THREE.ConeGeometry(4.2, 2.35, 9), rockMatMud);
+  mound.scale.set(1.15, 0.95, 2.25);
+  mound.position.set(halfW * 0.65 + 1.0, 0.95, 0);
+  mound.receiveShadow = true;
+  mound.castShadow = true;
+  debrisGroup.add(mound);
+
+  // Cluster of jagged slate Himalayan boulders occupying the blocked left half-lane
+  const boulderSpecs: Array<[number, number, number, number, number]> = [
+    [1.45, 0.72, -3.4, 0.95, 0],
+    [2.65, 1.15, -1.6, 1.38, 1],
+    [1.1, 0.62, 0.35, 0.86, 2],
+    [3.1, 1.35, 1.4, 1.48, 0],
+    [1.6, 0.78, 3.2, 1.05, 1],
+    [4.2, 1.65, -0.5, 1.75, 2],
+    [2.1, 0.68, -5.2, 0.82, 0],
+    [2.3, 0.72, 4.9, 0.9, 2],
+  ];
+  const rockMats = [rockMatDark, rockMatMud, rockMatLight];
+  for (const [bx, by, bz, r, mIdx] of boulderSpecs) {
+    const boulder = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), rockMats[mIdx]);
+    boulder.position.set(bx, by, bz);
+    boulder.rotation.set(bx * 1.1, bz * 0.7, by * 1.3);
+    boulder.scale.set(1.15, 0.85, 1.05);
+    boulder.castShadow = true;
+    boulder.receiveShadow = true;
+    debrisGroup.add(boulder);
+  }
+
+  // Fallen pine trunk across the scree pile
+  const log = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.34, 5.4, 8), woodMat);
+  log.position.set(2.4, 1.45, -0.8);
+  log.rotation.set(0.32, 0.4, 1.22);
+  debrisGroup.add(log);
+
+  // Bright Orange-White Highway Warning Cones guiding traffic onto the open single half-lane
+  const coneMat = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.55 });
+  const coneBandMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.4 });
+  for (const cz of [-7.5, -4.5, 0, 4.5, 7.5]) {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.72, 8), coneMat);
+    cone.position.set(0.15, 0.38, cz);
+    debrisGroup.add(cone);
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.19, 0.16, 8), coneBandMat);
+    band.position.set(0.15, 0.44, cz);
+    debrisGroup.add(band);
+  }
+
+  // Yellow JCB / BRO Road-Clearing Loader parked on shoulder beside the landslide
+  const jcb = new THREE.Group();
+  jcb.position.set(halfW + 1.8, 0, -9.8);
+  const jcbYellow = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.38, metalness: 0.3 });
+  const jcbDark = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 });
+  const jcbBody = new THREE.Mesh(new THREE.BoxGeometry(2.1, 1.25, 3.6), jcbYellow);
+  jcbBody.position.set(0, 1.15, 0);
+  jcbBody.castShadow = true;
+  jcb.add(jcbBody);
+  const jcbCab = new THREE.Mesh(new THREE.BoxGeometry(1.7, 1.3, 1.7), jcbDark);
+  jcbCab.position.set(0, 2.35, -0.45);
+  jcb.add(jcbCab);
+  const beaconLightMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
+  const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.24, 10), beaconLightMat);
+  beacon.position.set(0, 3.12, -0.45);
+  jcb.add(beacon);
+
+  // JCB wheels
+  for (const [wx, wz, wr] of [
+    [-1.08, 1.1, 0.52],
+    [1.08, 1.1, 0.52],
+    [-1.12, -1.05, 0.68],
+    [1.12, -1.05, 0.68],
+  ]) {
+    const wh = new THREE.Mesh(new THREE.CylinderGeometry(wr, wr, 0.36, 12), jcbDark);
+    wh.rotation.z = Math.PI / 2;
+    wh.position.set(wx, wr, wz);
+    jcb.add(wh);
+  }
+
+  // Animated Front Loader Boom & Bucket
+  const jcbBoomPivot = new THREE.Group();
+  jcbBoomPivot.position.set(0, 1.35, 1.55);
+  const boomArm = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.24, 2.1), jcbYellow);
+  boomArm.position.set(0, -0.1, 1.0);
+  jcbBoomPivot.add(boomArm);
+  const scoop = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.85, 0.9), jcbDark);
+  scoop.position.set(0, -0.45, 2.25);
+  jcbBoomPivot.add(scoop);
+  jcb.add(jcbBoomPivot);
+  group.add(jcb);
+
+  // BRO "CAUTION: LANDSLIDE AHEAD • ONE LANE" Signboard facing approaching drivers
+  const signTex = createSignboardTexture(
+    'CAUTION: LANDSLIDE ZONE',
+    'HALF ROAD BLOCKED • CLEAR OR PASS SLOWLY',
+    '#7F1D1D',
+    '#FEF08A',
+    '#F59E0B',
+    maxAniso
+  );
+  const signPost = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2, 8), jcbDark);
+  signPost.position.set(halfW + 1.1, 1.6, -14.5);
+  group.add(signPost);
+  const signBoard = new THREE.Mesh(
+    new THREE.BoxGeometry(3.4, 1.15, 0.12),
+    new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.4 })
+  );
+  signBoard.position.set(halfW + 0.5, 2.85, -14.5);
+  signBoard.rotation.y = Math.PI;
+  group.add(signBoard);
+
+  // World-space center of the blocked half-road boulder zone (offset +2.55m toward LEFT uphill side)
+  const blockCenter = pos.clone().addScaledVector(left, 2.55);
+
+  return {
+    group,
+    data: {
+      id,
+      label,
+      position: pos.clone(),
+      blockCenter,
+      tangent: tan.clone(),
+      right,
+      halfWidth: 2.35,
+      halfLength: 6.2,
+      debrisGroup,
+      jcbBoomPivot,
+      beaconLightMat,
+      clearing: false,
+      clearProgress: 0,
+      cleared: false,
+    },
+  };
+}
+

@@ -19,7 +19,7 @@ import type {
 } from '../types/simulator';
 import { buildHaryanaRoadwaysBus, type BusVisualRig } from './busBuilder';
 import { buildEndlessMountainWorld, type EndlessWorldHandle } from './endlessWorldBuilder';
-import { createSkyGradientDome } from './sceneryAndTraffic';
+import { createSkyGradientDome, type LandslideZoneData } from './sceneryAndTraffic';
 import { buildTrainingGroundArena, type TrainingArenaHandle } from './trainingBuilder';
 import { buildHimachalMountainWorld, type HimachalWorldHandle } from './worldBuilder';
 
@@ -41,6 +41,7 @@ export interface BusSimController {
   setAudioMuted: (muted: boolean) => void;
   resetSession: () => void;
   startTrainingAttempt: () => void;
+  clearLandslide: () => void;
 }
 
 interface BusSimulatorCanvasProps {
@@ -254,12 +255,17 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     rampStopZ: 0,
     trainingReported: false,
     orbitAngle: 0.65,
+    nearLandslideId: null as string | null,
+    nearLandslideLabel: null as string | null,
+    landslideClearing: false,
+    landslideClearPct: 0,
     needsWorldRebuild: true,
   });
 
   const audioRef = useRef<IndianBusAudioEngine | null>(null);
   const weatherUpdaterRef = useRef<((w: WeatherPreset) => void) | null>(null);
   const resetWorldFnRef = useRef<(() => void) | null>(null);
+  const clearLandslideFnRef = useRef<(() => void) | null>(null);
   const busRigRef = useRef<BusVisualRig | null>(null);
 
   const showNotice = (
@@ -427,6 +433,9 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.handbrake = false;
         showNotice('Official HSSC Test Started — Drive smoothly!', 'info', 2.6);
       }
+    },
+    clearLandslide() {
+      clearLandslideFnRef.current?.();
     },
   }));
 
@@ -681,6 +690,10 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       s.rampHoldTimer = 0;
       s.rampStopZ = 0;
       s.trainingReported = false;
+      s.nearLandslideId = null;
+      s.nearLandslideLabel = null;
+      s.landslideClearing = false;
+      s.landslideClearPct = 0;
 
       if (curMode === 'training') {
         const track = getTrackById(curTrackId);
@@ -772,7 +785,36 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       s.needsWorldRebuild = false;
     };
 
+    const triggerClearLandslide = () => {
+      const s = simRef.current;
+      const curMode = propsRef.current.mode;
+      const landslides: LandslideZoneData[] =
+        curMode === 'career' && himachalWorld
+          ? himachalWorld.landslides
+          : curMode === 'endless' && endlessWorld
+            ? endlessWorld.getLandslides()
+            : [];
+      let best: LandslideZoneData | null = null;
+      let bestDist = 40;
+      for (const ls of landslides) {
+        if (ls.cleared) continue;
+        const d = Math.hypot(s.busX - ls.position.x, s.busZ - ls.position.z);
+        if (d < bestDist) {
+          bestDist = d;
+          best = ls;
+        }
+      }
+      if (!best) return;
+      if (best.clearing) return;
+      best.clearing = true;
+      audio.init();
+      audio.playRockClear(1.4);
+      audio.triggerHindiCrowdVoice('landslide', 3500);
+      showNotice(`JCB clearing ${best.label}... Hold steady!`, 'info', 2.8);
+    };
+
     resetWorldFnRef.current = rebuildWorld;
+    clearLandslideFnRef.current = triggerClearLandslide;
     rebuildWorld();
 
     if (!isSoftwareGl) {
@@ -831,6 +873,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         controllerRef.current?.setIndicator('hazard');
       } else if (code === 'KeyV') {
         controllerRef.current?.toggleWipers();
+      } else if (code === 'KeyJ') {
+        controllerRef.current?.clearLandslide();
       } else if (code === 'KeyR') {
         controllerRef.current?.resetSession();
       }
@@ -852,6 +896,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('resize', onResize);
+    document.addEventListener('fullscreenchange', onResize);
+    document.addEventListener('webkitfullscreenchange', onResize);
 
     // Solid OBB-style bus-vs-traffic physical collision & separation so bus NEVER passes through vehicles!
     const resolveBusTrafficCollisions = (
@@ -977,6 +1023,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         bus.updateLights(1, false, false, 'off', true, blinkOn);
         bus.updateWipers(elapsed, false);
         audio.updateEngine(760, 0, false);
+        audio.updateCrowdAmbience(0, elapsed);
 
         const r = 15.5;
         camera.position.set(
@@ -1425,6 +1472,89 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         resolveBusTrafficCollisions(endlessWorld.traffic);
       }
 
+      // Half-Road Landslide Collision, Proximity Prompt & JCB Manual Clearance Bonus (Career & Endless)
+      const activeLandslides: LandslideZoneData[] =
+        curMode === 'career' && himachalWorld
+          ? himachalWorld.landslides
+          : curMode === 'endless' && endlessWorld
+            ? endlessWorld.getLandslides()
+            : [];
+
+      if (s.landslideClearing && s.nearLandslideId) {
+        const finished = activeLandslides.find((l) => l.id === s.nearLandslideId && l.cleared);
+        if (finished) {
+          if (curMode === 'career') {
+            s.tripEarningsInr += 250;
+            showNotice(`Landslide cleared at ${finished.label}! Road open (+₹250 BRO bonus)`, 'success', 3.6);
+          } else {
+            showNotice(`Landslide cleared at ${finished.label}! Highway open.`, 'success', 3.4);
+          }
+          audio.playConductorBell();
+        }
+      }
+
+      let nearestLs: LandslideZoneData | null = null;
+      let nearestLsDist = 36;
+      for (const ls of activeLandslides) {
+        if (ls.cleared) continue;
+
+        // Solid boulder collision on the blocked uphill left half-road (open right half remains passable)
+        if (ls.clearProgress < 0.72) {
+          const dx = s.busX - ls.blockCenter.x;
+          const dz = s.busZ - ls.blockCenter.z;
+          if (dx * dx + dz * dz < 169) {
+            const lsLong = dx * ls.tangent.x + dz * ls.tangent.z;
+            const lsLat = dx * ls.right.x + dz * ls.right.z;
+            const sumW = ls.halfWidth + 1.24;
+            const sumL = ls.halfLength + 4.85;
+            if (Math.abs(lsLat) < sumW && Math.abs(lsLong) < sumL) {
+              const penLat = sumW - Math.abs(lsLat);
+              const penLong = sumL - Math.abs(lsLong);
+              if (penLat < penLong) {
+                const sign = lsLat >= 0 ? 1 : -1;
+                const push = penLat + 0.05;
+                s.busX += ls.right.x * sign * push;
+                s.busZ += ls.right.z * sign * push;
+                s.speedMs *= 0.72;
+              } else {
+                const sign = lsLong >= 0 ? 1 : -1;
+                const push = penLong + 0.06;
+                s.busX += ls.tangent.x * sign * push;
+                s.busZ += ls.tangent.z * sign * push;
+                s.speedMs = -Math.sign(s.speedMs) * Math.min(0.9, Math.abs(s.speedMs) * 0.14);
+              }
+              if (s.collisionCooldown <= 0) {
+                s.collisionCooldown = 0.85;
+                s.damagePct = Math.min(100, s.damagePct + 2.5);
+                audio.playBump();
+                showNotice('Landslide boulders on left lane! Squeeze right or press J to clear.', 'warning', 2.4);
+              }
+            }
+          }
+        }
+
+        const dCenter = Math.hypot(s.busX - ls.position.x, s.busZ - ls.position.z);
+        if (dCenter < nearestLsDist) {
+          nearestLsDist = dCenter;
+          nearestLs = ls;
+        }
+      }
+
+      if (nearestLs) {
+        s.nearLandslideId = nearestLs.id;
+        s.nearLandslideLabel = nearestLs.label;
+        s.landslideClearing = nearestLs.clearing;
+        s.landslideClearPct = Math.round(nearestLs.clearProgress * 100);
+        if (!nearestLs.clearing && nearestLsDist < 32) {
+          audio.triggerHindiCrowdVoice('landslide', 15500);
+        }
+      } else {
+        s.nearLandslideId = null;
+        s.nearLandslideLabel = null;
+        s.landslideClearing = false;
+        s.landslideClearPct = 0;
+      }
+
       // Commit final post-collision Bus Transform
       bus.root.position.set(s.busX, s.busY, s.busZ);
       bus.root.rotation.set(0, s.busHeading, 0);
@@ -1435,8 +1565,33 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       sunLight.position.set(s.busX + 65, s.busY + 110, s.busZ + 45);
       sunLight.target.position.set(s.busX, s.busY, s.busZ);
 
-      // Update audio engine
+      // Update audio engine + authentic Hindi crowd ambience & chatter
       audio.updateEngine(s.rpm, throttleIn, true);
+      if (curMode === 'career' || curMode === 'endless') {
+        let nearStopCrowd = false;
+        if (curMode === 'career' && himachalWorld) {
+          for (const st of himachalWorld.stops) {
+            const dStop = Math.hypot(s.busX - st.bayCenter.x, s.busZ - st.bayCenter.z);
+            if (dStop < 38) {
+              nearStopCrowd = true;
+              break;
+            }
+          }
+        }
+        let crowdIntensity = Math.min(0.55, (s.passengersOnBoard / 48) * 0.45);
+        if (s.cameraMode === 'cabin') crowdIntensity += 0.22;
+        if (s.doorOpen) crowdIntensity += 0.2;
+        if (nearStopCrowd) crowdIntensity = Math.min(1, crowdIntensity + 0.48);
+        audio.updateCrowdAmbience(crowdIntensity, elapsed);
+
+        if (nearStopCrowd || (s.activeStopIdx >= 0 && s.doorOpen)) {
+          audio.triggerHindiCrowdVoice('bus_stop', 9500);
+        } else if (s.passengersOnBoard >= 6) {
+          audio.triggerHindiCrowdVoice('onboard', 22000);
+        }
+      } else {
+        audio.updateCrowdAmbience(0, elapsed);
+      }
 
       // Training Mode: Official HSSC Referee Evaluation
       if (curMode === 'training' && trainingArena && s.training && s.training.phase === 'active') {
@@ -1725,6 +1880,10 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         brakeActive: s.brakeActive,
         shiftHint: s.shiftHint,
         autoRange: s.autoRange,
+        nearLandslideId: s.nearLandslideId,
+        nearLandslideLabel: s.nearLandslideLabel,
+        landslideClearing: s.landslideClearing,
+        landslideClearPct: s.landslideClearPct,
         training: s.training ? { ...s.training } : null,
       });
     };
@@ -1761,6 +1920,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('resize', onResize);
+      document.removeEventListener('fullscreenchange', onResize);
+      document.removeEventListener('webkitfullscreenchange', onResize);
       renderer.domElement.removeEventListener('pointerdown', onCanvasPointerDown);
       renderer.domElement.removeEventListener('pointermove', onCanvasPointerMove);
       renderer.domElement.removeEventListener('pointerup', onCanvasPointerUp);

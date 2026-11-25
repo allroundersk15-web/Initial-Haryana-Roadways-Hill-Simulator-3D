@@ -18,6 +18,7 @@ import {
   Users,
   Volume2,
   VolumeX,
+  Wrench,
 } from 'lucide-react';
 import type { BusSimController } from '../three/BusSimulatorCanvas';
 import type { SimMode, TelemetrySnapshot } from '../types/simulator';
@@ -337,6 +338,45 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
             >
               {telemetry.doorOpen ? 'Close Door' : 'Open Door'}
             </button>
+          </div>
+        )}
+
+        {/* Half-Road Landslide Manual Clearance Prompt */}
+        {(mode === 'career' || mode === 'endless') && telemetry.nearLandslideId && !telemetry.tripCompleted && (
+          <div className="pointer-events-auto hud-panel rounded-xl px-3.5 py-2 mt-1.5 flex items-center gap-3 border-amber-400/50">
+            <div className="min-w-[165px]">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>{telemetry.nearLandslideLabel || 'Landslide Ahead'}</span>
+              </div>
+              {telemetry.landslideClearing ? (
+                <div className="mt-1">
+                  <div className="w-full h-1.5 rounded-full bg-slate-800/80 overflow-hidden">
+                    <div
+                      className="h-full bg-amber-400 transition-all duration-100"
+                      style={{ width: `${Math.max(8, telemetry.landslideClearPct)}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] text-amber-200 font-mono tabular-nums mt-0.5">
+                    JCB clearing road… {telemetry.landslideClearPct}%
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-200 font-mono">
+                  Half road blocked · Squeeze right or clear
+                </div>
+              )}
+            </div>
+            {!telemetry.landslideClearing && (
+              <button
+                type="button"
+                onClick={() => controllerRef.current?.clearLandslide()}
+                className="hud-compact px-3 py-1.5 rounded-lg bg-amber-500/85 hover:bg-amber-400/90 border-amber-200/60 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+              >
+                <Wrench className="w-3.5 h-3.5" />
+                <span>Clear Road (J)</span>
+              </button>
+            )}
           </div>
         )}
 
