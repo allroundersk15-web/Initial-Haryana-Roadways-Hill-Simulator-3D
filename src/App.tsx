@@ -99,6 +99,8 @@ const INITIAL_TELEMETRY: TelemetrySnapshot = {
   damagePct: 0,
   cameraMode: 'chase',
   weather: 'sunny',
+  timeOfDayHours: 9.5,
+  timeOfDayLabel: '09:30 Morning',
   endlessBiome: null,
   noticeText: null,
   noticeSeverity: 'info',

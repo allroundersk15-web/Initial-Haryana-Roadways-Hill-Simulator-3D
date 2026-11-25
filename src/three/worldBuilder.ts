@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import type { CareerRouteSpec, LandmarkType, RouteStopSpec } from '../types/simulator';
 import {
   buildCurvedMountainTunnel,
+  buildDynamicDhabaComplex,
   buildIndianTrafficVehicle,
   buildNhaiTollPlaza,
   buildPahadiMountainHouse,
   buildRoadLandslideZone,
   createHighDetailAsphaltTexture,
   createSignboardTexture,
+  updateDhabaComplex,
+  type DhabaComplexData,
   type LandslideZoneData,
   type TollPlazaData,
   type TrafficKind,
@@ -58,6 +61,7 @@ export interface HimachalWorldHandle {
   stops: StopZoneData[];
   tolls: TollPlazaData[];
   landslides: LandslideZoneData[];
+  dhabas: DhabaComplexData[];
   passengers: PassengerActor[];
   traffic: TrafficVehicle[];
   rainSystem: THREE.Points;
@@ -78,7 +82,8 @@ export interface HimachalWorldHandle {
     busSpeedMs: number,
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
-    isRaining: boolean
+    isRaining: boolean,
+    nightFactor?: number
   ) => void;
   dispose: () => void;
 }
@@ -498,14 +503,17 @@ export function buildHimachalMountainWorld(
     roadUvs.push(0, t, 1, t);
 
     const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.032);
+    const nearDhaba = route.stops.some(
+      (s) => s.landmarkType === 'dhaba' && Math.abs(s.progressT - t) < 0.044
+    );
     const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.025);
     const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.008 && t <= tn.end + 0.008);
 
     // Uphill terraced mountain cliff on LEFT side (+leftVec)
-    // Flatten generously near stops & tolls, keep modest clean setback inside tunnels so cliff never intrudes!
-    const shoulderW = nearStop || nearToll ? 16.5 : inTunnel ? 8.5 : 4.2;
-    const midOut = nearStop || nearToll ? 30 : inTunnel ? 24 : 21;
-    const midLift = nearStop || nearToll ? 14 : inTunnel ? 9 : 22 + Math.sin(t * 68) * 5;
+    // Flatten generously near Dhabas (for full bus parking yard), stops & tolls!
+    const shoulderW = nearDhaba ? 24.5 : nearStop || nearToll ? 16.5 : inTunnel ? 8.5 : 4.2;
+    const midOut = nearDhaba ? 38 : nearStop || nearToll ? 30 : inTunnel ? 24 : 21;
+    const midLift = nearDhaba ? 12 : nearStop || nearToll ? 14 : inTunnel ? 9 : 22 + Math.sin(t * 68) * 5;
     const peakLift = inTunnel ? 28 : 58 + Math.cos(t * 36 + seed) * 16;
 
     const c0 = p.clone().addScaledVector(leftVec, halfW + 0.1);
@@ -881,8 +889,9 @@ export function buildHimachalMountainWorld(
     }
   }
 
-  // 10. Route Landmarks (Bus Stands, Dhabas, Markets, Pahadi Mandirs) + Waiting Crowds + Stop Bays
+  // 10. Route Landmarks (Bus Stands, Dynamic Dhabas with Bus Parking & Traffic, Markets, Mandirs) + Waiting Crowds
   const stops: StopZoneData[] = [];
+  const dhabas: DhabaComplexData[] = [];
   const passengers: PassengerActor[] = [];
 
   route.stops.forEach((stop, stopIdx) => {
@@ -891,26 +900,43 @@ export function buildHimachalMountainWorld(
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
     const left = right.clone().negate();
 
-    const landmarkMesh = buildLandmarkStructure(stop.landmarkType, stop, maxAniso);
-    const structOffset = stop.landmarkType === 'mandir' ? halfW + 9.2 : halfW + 6.4;
-    landmarkMesh.position.copy(pt).addScaledVector(left, structOffset);
-    landmarkMesh.lookAt(pt.clone().addScaledVector(right, 8));
-    root.add(landmarkMesh);
+    let bayCenter = pt.clone().addScaledVector(left, halfW * 0.48);
 
-    const bayCenter = pt.clone().addScaledVector(left, halfW * 0.48);
+    if (stop.landmarkType === 'dhaba') {
+      // Full lively Dhaba Complex with dedicated Bus Parking Bay, crowd & arriving/parking/departing bikes, cars & buses!
+      const dhabaData = buildDynamicDhabaComplex(
+        stop.id,
+        stop.signageTitle,
+        stop.hindiName,
+        pt,
+        tan,
+        roadWidth,
+        maxAniso
+      );
+      root.add(dhabaData.group);
+      dhabas.push(dhabaData);
+      bayCenter = dhabaData.busBayWorldPos.clone();
+    } else {
+      const landmarkMesh = buildLandmarkStructure(stop.landmarkType, stop, maxAniso);
+      const structOffset = stop.landmarkType === 'mandir' ? halfW + 9.2 : halfW + 6.4;
+      landmarkMesh.position.copy(pt).addScaledVector(left, structOffset);
+      landmarkMesh.lookAt(pt.clone().addScaledVector(right, 8));
+      root.add(landmarkMesh);
+    }
+
     const bayMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(3.8, 14.5),
       new THREE.MeshBasicMaterial({
         color: 0xfacc15,
         transparent: true,
-        opacity: 0.28,
+        opacity: stop.landmarkType === 'dhaba' ? 0.2 : 0.28,
         depthWrite: false,
         polygonOffset: true,
         polygonOffsetFactor: -1,
       })
     );
     bayMesh.position.copy(bayCenter);
-    bayMesh.position.y += 0.08;
+    bayMesh.position.y += 0.09;
     bayMesh.lookAt(bayCenter.clone().add(tan));
     bayMesh.rotateX(-Math.PI / 2);
     root.add(bayMesh);
@@ -938,11 +964,16 @@ export function buildHimachalMountainWorld(
     for (let pIdx = 0; pIdx < crowdTotal; pIdx++) {
       const actor = buildHumanActor(stopIdx * 31 + pIdx * 7);
       const alongOffset = (pIdx - crowdTotal / 2) * 1.15;
-      const curbDist = halfW + 1.9 + (pIdx % 2) * 1.1;
-      const basePos = pt
-        .clone()
-        .addScaledVector(left, curbDist)
-        .addScaledVector(tan, alongOffset);
+      const basePos =
+        stop.landmarkType === 'dhaba'
+          ? bayCenter
+              .clone()
+              .addScaledVector(left, 2.8 + (pIdx % 2) * 1.1)
+              .addScaledVector(tan, alongOffset)
+          : pt
+              .clone()
+              .addScaledVector(left, halfW + 1.9 + (pIdx % 2) * 1.1)
+              .addScaledVector(tan, alongOffset);
       actor.position.copy(basePos);
       actor.lookAt(bayCenter);
       root.add(actor);
@@ -1078,8 +1109,14 @@ export function buildHimachalMountainWorld(
     _busSpeedMs: number,
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
-    isRaining: boolean
+    isRaining: boolean,
+    nightFactor = 0
   ) {
+    // Animate Dhaba arriving/parking/departing cars, bikes & buses + crowd + night lights
+    for (const dh of dhabas) {
+      updateDhabaComplex(dh, dt, elapsed, nightFactor);
+    }
+
     // Animate stop beacons
     for (const s of stops) {
       if (!s.completed) {
@@ -1300,6 +1337,7 @@ export function buildHimachalMountainWorld(
     stops,
     tolls,
     landslides,
+    dhabas,
     passengers,
     traffic,
     rainSystem,

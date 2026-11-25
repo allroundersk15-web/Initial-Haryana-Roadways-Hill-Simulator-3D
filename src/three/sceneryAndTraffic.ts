@@ -118,61 +118,227 @@ export function createSignboardTexture(
   return tex;
 }
 
+export interface DayNightSkyHandle {
+  group: THREE.Group;
+  updateSky: (timeOfDayHours: number, weather: WeatherPreset) => void;
+  dispose: () => void;
+}
+
+function lerpHexColor(a: number, b: number, t: number, out: THREE.Color): THREE.Color {
+  const ca = new THREE.Color(a);
+  const cb = new THREE.Color(b);
+  return out.copy(ca).lerp(cb, THREE.MathUtils.clamp(t, 0, 1));
+}
+
 /**
- * Procedural Sky Gradient Dome for crisp Himalayan daylight / mist / rain / starlit night atmosphere.
+ * Dynamic 24-Hour Day-Night Sky Dome with glowing Sun, Moon, and Starfield
+ * smoothly blending Dawn -> Morning -> Noon -> Golden Sunset -> Dusk -> Starlit Night.
  */
-export function createSkyGradientDome(): {
-  mesh: THREE.Mesh;
-  updateWeather: (w: WeatherPreset) => void;
-} {
+export function createSkyGradientDome(): DayNightSkyHandle {
+  const group = new THREE.Group();
   const canvas = document.createElement('canvas');
   canvas.width = 64;
   canvas.height = 512;
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
 
-  const paintSky = (w: WeatherPreset) => {
+  const domeMat = new THREE.MeshBasicMaterial({
+    map: tex,
+    side: THREE.BackSide,
+    fog: false,
+    depthWrite: false,
+  });
+  const domeGeo = new THREE.SphereGeometry(1150, 24, 16);
+  const domeMesh = new THREE.Mesh(domeGeo, domeMat);
+  domeMesh.renderOrder = -12;
+  group.add(domeMesh);
+
+  // Glowing 3D Sun disc + soft corona
+  const sunGroup = new THREE.Group();
+  const sunDiscGeo = new THREE.SphereGeometry(34, 16, 16);
+  const sunDiscMat = new THREE.MeshBasicMaterial({ color: 0xfff8d6, fog: false, depthWrite: false });
+  const sunDisc = new THREE.Mesh(sunDiscGeo, sunDiscMat);
+  const sunHaloGeo = new THREE.SphereGeometry(60, 16, 16);
+  const sunHaloMat = new THREE.MeshBasicMaterial({
+    color: 0xfde047,
+    transparent: true,
+    opacity: 0.28,
+    fog: false,
+    depthWrite: false,
+  });
+  const sunHalo = new THREE.Mesh(sunHaloGeo, sunHaloMat);
+  sunGroup.add(sunDisc, sunHalo);
+  sunGroup.renderOrder = -11;
+  group.add(sunGroup);
+
+  // Crisp 3D Moon disc
+  const moonGeo = new THREE.SphereGeometry(24, 16, 16);
+  const moonMat = new THREE.MeshBasicMaterial({
+    color: 0xe2ecff,
+    transparent: true,
+    opacity: 0.92,
+    fog: false,
+    depthWrite: false,
+  });
+  const moonMesh = new THREE.Mesh(moonGeo, moonMat);
+  moonMesh.renderOrder = -11;
+  group.add(moonMesh);
+
+  // Himalayan Starfield (fades in smoothly during twilight & night)
+  const starCount = 340;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(0.08 + Math.random() * 0.92); // upper hemisphere only
+    const r = 980;
+    starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    starPos[i * 3 + 1] = r * Math.cos(phi);
+    starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starMat = new THREE.PointsMaterial({
+    color: 0xf8fafc,
+    size: 4.5,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0,
+    fog: false,
+    depthWrite: false,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  stars.renderOrder = -11;
+  group.add(stars);
+
+  let lastPaintedHour = -99;
+  let lastWeather: WeatherPreset | null = null;
+  const cTop = new THREE.Color();
+  const cMid = new THREE.Color();
+  const cHor = new THREE.Color();
+  const cLow = new THREE.Color();
+
+  const updateSky = (timeOfDayHours: number, weather: WeatherPreset) => {
+    const h = ((timeOfDayHours % 24) + 24) % 24;
+
+    // Position Sun & Moon continuously along sky arc (sunrise ~6:00, zenith ~12:00, sunset ~18:00)
+    const sunAngle = ((h - 6) / 12) * Math.PI; // 0 at 6am, PI/2 at noon, PI at 6pm
+    const orbitR = 900;
+    const sunY = Math.sin(sunAngle) * orbitR;
+    const sunX = Math.cos(sunAngle) * orbitR;
+    const sunZ = -320;
+    sunGroup.position.set(sunX, sunY, sunZ);
+    sunGroup.visible = sunY > -65 && weather !== 'rain';
+
+    const horizonWarmth = Math.max(0, 1 - Math.abs(sunY) / 380);
+    sunDiscMat.color.setHex(horizonWarmth > 0.45 ? 0xffb347 : 0xfff8d6);
+    sunHaloMat.color.setHex(horizonWarmth > 0.45 ? 0xf97316 : 0xfde047);
+    sunHaloMat.opacity = weather === 'mist' ? 0.14 : 0.3;
+
+    // Opposite Moon arc
+    moonMesh.position.set(-sunX, -sunY, 280);
+    const nightWeight =
+      h >= 20 || h < 5
+        ? 1
+        : h >= 18.2 && h < 20
+          ? (h - 18.2) / 1.8
+          : h >= 5 && h < 6.8
+            ? 1 - (h - 5) / 1.8
+            : 0;
+    moonMesh.visible = -sunY > -40 && nightWeight > 0.08;
+    moonMat.opacity = Math.min(0.95, nightWeight * (weather === 'rain' ? 0.35 : 1));
+    starMat.opacity = Math.max(0, (nightWeight - 0.15) * (weather === 'rain' ? 0.15 : weather === 'mist' ? 0.35 : 0.92));
+
+    // Repaint sky dome gradient only when hour or weather shifts noticeably
+    if (Math.abs(h - lastPaintedHour) < 0.045 && weather === lastWeather) return;
+    lastPaintedHour = h;
+    lastWeather = weather;
+
+    // Keyframe sky palettes across 24h cycle
+    if (h < 5.0 || h >= 20.5) {
+      // Deep Himalayan Starlit Night
+      cTop.setHex(0x030712);
+      cMid.setHex(0x09142b);
+      cHor.setHex(0x132445);
+      cLow.setHex(0x070d1c);
+    } else if (h < 6.8) {
+      // Dawn Sunrise
+      const t = (h - 5.0) / 1.8;
+      lerpHexColor(0x09142b, 0x2c6eb5, t, cTop);
+      lerpHexColor(0x1a284f, 0xe88b5a, t < 0.65 ? t / 0.65 : 1 - (t - 0.65) / 0.35, cMid);
+      lerpHexColor(0x283558, 0xfdba74, t, cHor);
+      lerpHexColor(0x111a2c, 0x7c8e82, t, cLow);
+    } else if (h < 8.5) {
+      // Crisp Morning into Full Daylight
+      const t = (h - 6.8) / 1.7;
+      lerpHexColor(0x2c6eb5, 0x1d5ea8, t, cTop);
+      lerpHexColor(0x8bbce6, 0x5fa8e6, t, cMid);
+      lerpHexColor(0xfdba74, 0xd6e9f8, t, cHor);
+      lerpHexColor(0x7c8e82, 0x7a9280, t, cLow);
+    } else if (h < 16.5) {
+      // Clear Himalayan Daytime
+      cTop.setHex(0x1d5ea8);
+      cMid.setHex(0x5fa8e6);
+      cHor.setHex(0xcbe2f5);
+      cLow.setHex(0x7a9280);
+    } else if (h < 18.6) {
+      // Golden Himalayan Sunset
+      const t = (h - 16.5) / 2.1;
+      lerpHexColor(0x1d5ea8, 0x293b6b, t, cTop);
+      lerpHexColor(0x5fa8e6, 0xe07a52, t, cMid);
+      lerpHexColor(0xcbe2f5, 0xf97316, t, cHor);
+      lerpHexColor(0x7a9280, 0x45353a, t, cLow);
+    } else {
+      // Dusk Twilight -> Night
+      const t = (h - 18.6) / 1.9;
+      lerpHexColor(0x293b6b, 0x030712, t, cTop);
+      lerpHexColor(0xe07a52, 0x09142b, t, cMid);
+      lerpHexColor(0xf97316, 0x132445, t, cHor);
+      lerpHexColor(0x45353a, 0x070d1c, t, cLow);
+    }
+
+    // Modulate palette for Misty / Rainy overcast skies while preserving Day-Night brightness!
+    if (weather === 'mist') {
+      const mistTint = new THREE.Color(nightWeight > 0.5 ? 0x1c2838 : 0xbccad6);
+      cTop.lerp(mistTint, 0.58);
+      cMid.lerp(mistTint, 0.65);
+      cHor.lerp(mistTint, 0.72);
+    } else if (weather === 'rain') {
+      const rainTint = new THREE.Color(nightWeight > 0.5 ? 0x0e1726 : 0x47596d);
+      cTop.lerp(rainTint, 0.72);
+      cMid.lerp(rainTint, 0.76);
+      cHor.lerp(rainTint, 0.72);
+    }
+
     const ctx = canvas.getContext('2d')!;
     const grad = ctx.createLinearGradient(0, 0, 0, 512);
-    if (w === 'sunny') {
-      grad.addColorStop(0, '#1D5EA8');
-      grad.addColorStop(0.38, '#5FA8E6');
-      grad.addColorStop(0.62, '#B6D9F4');
-      grad.addColorStop(0.75, '#E4EEF6');
-      grad.addColorStop(1, '#7A9280');
-    } else if (w === 'mist') {
-      grad.addColorStop(0, '#8FA6BA');
-      grad.addColorStop(0.5, '#BCCAD6');
-      grad.addColorStop(0.75, '#D2DCE4');
-      grad.addColorStop(1, '#9BAAB8');
-    } else if (w === 'rain') {
-      grad.addColorStop(0, '#334155');
-      grad.addColorStop(0.5, '#54667B');
-      grad.addColorStop(0.76, '#6E8094');
-      grad.addColorStop(1, '#3B4856');
-    } else {
-      grad.addColorStop(0, '#040914');
-      grad.addColorStop(0.48, '#0A1730');
-      grad.addColorStop(0.72, '#13264A');
-      grad.addColorStop(1, '#081020');
-    }
+    grad.addColorStop(0, `#${cTop.getHexString()}`);
+    grad.addColorStop(0.42, `#${cMid.getHexString()}`);
+    grad.addColorStop(0.7, `#${cHor.getHexString()}`);
+    grad.addColorStop(1, `#${cLow.getHexString()}`);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 64, 512);
     tex.needsUpdate = true;
   };
 
-  paintSky('sunny');
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(1150, 24, 16),
-    new THREE.MeshBasicMaterial({
-      map: tex,
-      side: THREE.BackSide,
-      fog: false,
-      depthWrite: false,
-    })
-  );
-  mesh.renderOrder = -10;
-  return { mesh, updateWeather: paintSky };
+  updateSky(9.5, 'sunny');
+
+  return {
+    group,
+    updateSky,
+    dispose() {
+      domeGeo.dispose();
+      domeMat.dispose();
+      tex.dispose();
+      sunDiscGeo.dispose();
+      sunDiscMat.dispose();
+      sunHaloGeo.dispose();
+      sunHaloMat.dispose();
+      moonGeo.dispose();
+      moonMat.dispose();
+      starGeo.dispose();
+      starMat.dispose();
+    },
+  };
 }
 
 /**
@@ -1064,5 +1230,591 @@ export function buildRoadLandslideZone(
       cleared: false,
     },
   };
+}
+
+/**
+ * Builds a realistic Indian Highway Motorcycle (Splendor / Royal Enfield style) with helmeted rider
+ * for Dhaba parking & arriving/departing traffic!
+ */
+export function buildIndianMotorcycleWithRider(seed = 0): {
+  group: THREE.Group;
+  riderGroup: THREE.Group;
+  headlightMat: THREE.MeshStandardMaterial;
+} {
+  const g = new THREE.Group();
+  const tankPalette = [0xb91c1c, 0x1d4ed8, 0x0f172a, 0x15803d, 0xd97706];
+  const jacketPalette = [0x1e293b, 0x991b1b, 0x0369a1, 0x3f6212];
+
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x14171c, roughness: 0.92 });
+  const chromeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.2, metalness: 0.88 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.72 });
+  const tankMat = new THREE.MeshPhysicalMaterial({
+    color: tankPalette[seed % tankPalette.length],
+    roughness: 0.25,
+    metalness: 0.35,
+    clearcoat: 0.85,
+  });
+  const headlightMat = new THREE.MeshStandardMaterial({
+    color: 0xfffbeb,
+    emissive: 0xfef08a,
+    emissiveIntensity: 0.9,
+  });
+
+  // Front & rear spoked wheels
+  for (const wz of [0.68, -0.66]) {
+    const tire = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.065, 8, 16), tireMat);
+    tire.rotation.y = Math.PI / 2;
+    tire.position.set(0, 0.34, wz);
+    g.add(tire);
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.14, 10), chromeMat);
+    hub.rotation.z = Math.PI / 2;
+    hub.position.set(0, 0.34, wz);
+    g.add(hub);
+  }
+
+  // Chassis frame, engine block & exhaust silencer
+  const engine = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.34, 0.42), chromeMat);
+  engine.position.set(0, 0.46, 0.04);
+  g.add(engine);
+  const exhaust = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.95, 8), chromeMat);
+  exhaust.rotation.x = Math.PI / 2 - 0.12;
+  exhaust.position.set(-0.18, 0.34, -0.35);
+  g.add(exhaust);
+
+  // Fuel tank & cushioned seat
+  const tank = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.24, 0.52), tankMat);
+  tank.position.set(0, 0.78, 0.22);
+  tank.castShadow = true;
+  g.add(tank);
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.14, 0.72), darkMat);
+  seat.position.set(0, 0.72, -0.32);
+  g.add(seat);
+
+  // Front forks, handlebar, headlight & red tail lamp
+  const fork = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.72, 8), chromeMat);
+  fork.position.set(0, 0.68, 0.54);
+  fork.rotation.x = -0.32;
+  g.add(fork);
+  const handleBar = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.66, 8), chromeMat);
+  handleBar.rotation.z = Math.PI / 2;
+  handleBar.position.set(0, 1.0, 0.44);
+  g.add(handleBar);
+  const hl = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.08, 0.14, 10), headlightMat);
+  hl.rotation.x = Math.PI / 2;
+  hl.position.set(0, 0.92, 0.66);
+  g.add(hl);
+  const tl = new THREE.Mesh(
+    new THREE.BoxGeometry(0.14, 0.1, 0.06),
+    new THREE.MeshStandardMaterial({ color: 0xdc2626, emissive: 0xef4444, emissiveIntensity: 0.7 })
+  );
+  tl.position.set(0, 0.74, -0.78);
+  g.add(tl);
+
+  // Helmeted Indian Rider (visible while riding in & out; hides when parked so rider is "inside Dhaba"!)
+  const riderGroup = new THREE.Group();
+  const jacketMat = new THREE.MeshStandardMaterial({
+    color: jacketPalette[seed % jacketPalette.length],
+    roughness: 0.8,
+  });
+  const helmetMat = new THREE.MeshPhysicalMaterial({
+    color: seed % 2 === 0 ? 0x0f172a : 0xdc2626,
+    roughness: 0.22,
+    clearcoat: 0.9,
+  });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.52, 0.24), jacketMat);
+  torso.position.set(0, 1.12, -0.18);
+  torso.rotation.x = 0.22;
+  riderGroup.add(torso);
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 12), helmetMat);
+  helmet.position.set(0, 1.52, -0.08);
+  riderGroup.add(helmet);
+  for (const sx of [-0.18, 0.18]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.055, 0.52, 8), darkMat);
+    leg.position.set(sx, 0.64, -0.05);
+    leg.rotation.x = -0.35;
+    riderGroup.add(leg);
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.042, 0.46, 8), jacketMat);
+    arm.position.set(sx * 1.1, 1.14, 0.16);
+    arm.rotation.x = 1.15;
+    riderGroup.add(arm);
+  }
+  g.add(riderGroup);
+
+  return { group: g, riderGroup, headlightMat };
+}
+
+export interface DhabaVisitorVehicle {
+  mesh: THREE.Group;
+  riderGroup?: THREE.Group;
+  kind: 'bike' | 'car' | 'suv' | 'bus';
+  parkLocalX: number;
+  parkLocalZ: number;
+  parkYaw: number;
+  entryZ: number;
+  exitZ: number;
+  roadEdgeX: number;
+  cycleDuration: number;
+  phaseTime: number;
+}
+
+export interface DhabaCrowdPerson {
+  mesh: THREE.Group;
+  baseX: number;
+  baseZ: number;
+  walkRadius: number;
+  walkSpeed: number;
+  phase: number;
+}
+
+export interface DhabaComplexData {
+  id: string;
+  title: string;
+  position: THREE.Vector3; // Road centerline point
+  busBayWorldPos: THREE.Vector3; // Center of the paved Dhaba Bus Parking Bay
+  tangent: THREE.Vector3;
+  right: THREE.Vector3;
+  group: THREE.Group;
+  visitors: DhabaVisitorVehicle[];
+  crowd: DhabaCrowdPerson[];
+  nightLightMats: THREE.MeshStandardMaterial[];
+  dhabaPointLight: THREE.PointLight;
+}
+
+function buildDhabaGuestPerson(seed: number): THREE.Group {
+  const g = new THREE.Group();
+  const shirtPalette = [0xf97316, 0x0284c7, 0xdc2626, 0x16a34a, 0x9333ea, 0xeab308, 0xf43f5e, 0x0d9488];
+  const pantPalette = [0x1e293b, 0x334155, 0x451a03, 0x0f172a];
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xc88d65, roughness: 0.78 });
+  const shirtMat = new THREE.MeshStandardMaterial({ color: shirtPalette[seed % shirtPalette.length], roughness: 0.85 });
+  const pantMat = new THREE.MeshStandardMaterial({ color: pantPalette[seed % pantPalette.length], roughness: 0.9 });
+
+  const lLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.068, 0.74, 8), pantMat);
+  lLeg.position.set(-0.1, 0.37, 0);
+  g.add(lLeg);
+  const rLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.068, 0.74, 8), pantMat);
+  rLeg.position.set(0.1, 0.37, 0);
+  g.add(rLeg);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.6, 0.22), shirtMat);
+  torso.position.set(0, 1.02, 0);
+  torso.castShadow = true;
+  g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 10, 10), skinMat);
+  head.position.set(0, 1.48, 0);
+  g.add(head);
+  return g;
+}
+
+/**
+ * Builds a complete lively Indian Highway Dhaba Complex on the LEFT (+X local) side of the highway:
+ * - Wide paved parking yard with a dedicated yellow-marked BUS PARKING BAY for the player's bus
+ * - Authentic Dhaba hall, tin roof, warm glowing string lights, charpais, clay tandoor & signboard
+ * - Mingling crowd of travellers & chai staff
+ * - Animated visiting motorcycles/bikes, Indian cars, SUVs, and other buses that drive in from the road,
+ *   park at the Dhaba, stay awhile, and then pull out & depart back onto the highway!
+ */
+export function buildDynamicDhabaComplex(
+  id: string,
+  title: string,
+  hindiName: string,
+  pos: THREE.Vector3,
+  tan: THREE.Vector3,
+  roadWidth: number,
+  maxAniso: number
+): DhabaComplexData {
+  const group = new THREE.Group();
+  group.position.copy(pos);
+  group.lookAt(pos.clone().add(tan));
+
+  const upVec = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+  const left = right.clone().negate();
+  const halfW = roadWidth * 0.5;
+
+  // 1. Wide Paved Dhaba Parking Apron & Courtyard (+X from halfW to halfW + 21m, length 40m)
+  const yardW = 20.5;
+  const yardL = 40.0;
+  const yardCenterX = halfW + yardW * 0.5 - 0.35;
+  const tarmacMat = new THREE.MeshStandardMaterial({ color: 0x3b424c, roughness: 0.92 });
+  const yardPad = new THREE.Mesh(new THREE.BoxGeometry(yardW, 0.16, yardL), tarmacMat);
+  yardPad.position.set(yardCenterX, -0.02, 0);
+  yardPad.receiveShadow = true;
+  group.add(yardPad);
+
+  // Gravel shoulder apron border
+  const gravelMat = new THREE.MeshStandardMaterial({ color: 0x6b6254, roughness: 0.96 });
+  const apron = new THREE.Mesh(new THREE.BoxGeometry(yardW + 2.4, 0.1, yardL + 5.0), gravelMat);
+  apron.position.set(yardCenterX + 0.6, -0.06, 0);
+  apron.receiveShadow = true;
+  group.add(apron);
+
+  // Dedicated Yellow-Marked Player BUS PARKING BAY (at X = halfW + 3.4, Z = -6.5)
+  const busBayX = halfW + 3.4;
+  const busBayZ = -6.5;
+  const paintYellow = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
+  const bayW = 4.2;
+  const bayL = 14.2;
+  // Painted parking bay outline strips
+  for (const bx of [-bayW / 2, bayW / 2]) {
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(0.18, bayL), paintYellow);
+    strip.rotation.x = -Math.PI / 2;
+    strip.position.set(busBayX + bx, 0.08, busBayZ);
+    group.add(strip);
+  }
+  for (const bz of [-bayL / 2, bayL / 2]) {
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(bayW, 0.18), paintYellow);
+    strip.rotation.x = -Math.PI / 2;
+    strip.position.set(busBayX, 0.08, busBayZ + bz);
+    group.add(strip);
+  }
+
+  // Crisp "BUS PARKING • DHABA STOP" Roadside Signpost
+  const parkSignTex = createSignboardTexture(
+    'DHABA BUS PARKING',
+    'FREE PARKING • TEA & MEALS',
+    '#14532D',
+    '#FFFFFF',
+    '#FACC15',
+    maxAniso
+  );
+  const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5, metalness: 0.6 });
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.4, 8), darkMetal);
+  post.position.set(halfW + 1.2, 1.7, -18.5);
+  group.add(post);
+  const parkSign = new THREE.Mesh(
+    new THREE.BoxGeometry(3.4, 1.15, 0.12),
+    new THREE.MeshStandardMaterial({
+      map: parkSignTex,
+      emissiveMap: parkSignTex,
+      emissive: 0xffffff,
+      emissiveIntensity: 0.3,
+      roughness: 0.4,
+    })
+  );
+  parkSign.position.set(halfW + 1.2, 3.05, -18.5);
+  parkSign.rotation.y = Math.PI;
+  group.add(parkSign);
+
+  // 2. Dhaba Building, Veranda, Charpais, Tandoor & Warm String Lights (set back at X = halfW + 15.8)
+  const hallX = halfW + 16.0;
+  const concreteMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.88 });
+  const woodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a26, roughness: 0.85 });
+  const nightLightMats: THREE.MeshStandardMaterial[] = [];
+
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.34, 19.5), concreteMat);
+  plinth.position.set(hallX - 0.6, 0.17, 0);
+  plinth.receiveShadow = true;
+  group.add(plinth);
+
+  const mainHall = new THREE.Mesh(
+    new THREE.BoxGeometry(5.2, 3.8, 16.0),
+    new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.82 })
+  );
+  mainHall.position.set(hallX + 0.6, 2.08, 0);
+  mainHall.castShadow = true;
+  group.add(mainHall);
+
+  // Warm glowing Dhaba interior doorway & windows
+  const dhabaWindowMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.45,
+    roughness: 0.25,
+  });
+  nightLightMats.push(dhabaWindowMat);
+  for (const wz of [-5.0, -1.6, 1.8, 5.2]) {
+    const win = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.45, 2.0), dhabaWindowMat);
+    win.position.set(hallX - 2.02, 2.15, wz);
+    group.add(win);
+  }
+
+  // Red Corrugated Tin Veranda Roof
+  const tinRoof = new THREE.Mesh(
+    new THREE.BoxGeometry(8.6, 0.22, 18.8),
+    new THREE.MeshStandardMaterial({ color: 0x991b1b, roughness: 0.58, metalness: 0.35 })
+  );
+  tinRoof.position.set(hallX - 0.4, 4.1, 0);
+  tinRoof.rotation.z = 0.12;
+  tinRoof.castShadow = true;
+  group.add(tinRoof);
+
+  // Veranda support pillars
+  for (const pz of [-8.2, -2.8, 2.8, 8.2]) {
+    const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 3.8, 8), darkMetal);
+    pillar.position.set(hallX - 3.6, 2.05, pz);
+    group.add(pillar);
+  }
+
+  // Festive Warm Glowing Dhaba Bulb Garland along the front eave
+  const bulbMat = new THREE.MeshStandardMaterial({
+    color: 0xfef9c3,
+    emissive: 0xfbbf24,
+    emissiveIntensity: 0.6,
+  });
+  nightLightMats.push(bulbMat);
+  for (let b = 0; b < 11; b++) {
+    const bz = -8.5 + b * 1.7;
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), bulbMat);
+    bulb.position.set(hallX - 4.1, 3.62, bz);
+    group.add(bulb);
+  }
+
+  // Warm local point light illuminating Dhaba parking at dusk/night
+  const dhabaPointLight = new THREE.PointLight(0xffbe66, 0.6, 28);
+  dhabaPointLight.position.set(hallX - 5.2, 4.4, 0);
+  group.add(dhabaPointLight);
+
+  // Classic Indian Charpais (cots) + Dining Tables on Courtyard
+  const weaveMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.94 });
+  for (const cz of [-6.4, -3.2, 0.2, 3.6, 6.8]) {
+    const cot = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.5, 2.1), woodMat);
+    cot.position.set(hallX - 4.8, 0.35, cz);
+    group.add(cot);
+    const weave = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.08, 1.85), weaveMat);
+    weave.position.set(hallX - 4.8, 0.62, cz);
+    group.add(weave);
+  }
+
+  // Glowing Clay Tandoor & Chai Stall Counter
+  const tandoor = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.62, 0.76, 1.08, 12),
+    new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.92 })
+  );
+  tandoor.position.set(hallX - 3.6, 0.64, -9.2);
+  group.add(tandoor);
+  const embers = new THREE.Mesh(
+    new THREE.CircleGeometry(0.42, 10),
+    new THREE.MeshBasicMaterial({ color: 0xf97316 })
+  );
+  embers.rotation.x = -Math.PI / 2;
+  embers.position.set(hallX - 3.6, 1.2, -9.2);
+  group.add(embers);
+
+  // Big Illuminated Dhaba Roof Signboard facing the highway (-X local)
+  const signTex = createSignboardTexture(
+    title,
+    `${hindiName} • TEA, PARANTHA & BUS PARKING`,
+    '#7C2D12',
+    '#FFFFFF',
+    '#F59E0B',
+    maxAniso
+  );
+  const signMat = new THREE.MeshStandardMaterial({
+    map: signTex,
+    emissiveMap: signTex,
+    emissive: 0xffe4b5,
+    emissiveIntensity: 0.55,
+    roughness: 0.35,
+  });
+  nightLightMats.push(signMat);
+  const sign = new THREE.Mesh(new THREE.BoxGeometry(0.22, 1.65, 13.8), signMat);
+  sign.position.set(hallX - 3.8, 5.15, 0);
+  group.add(sign);
+
+  // 3. Lively Dhaba Crowd (9 animated diners, staff & travellers walking between vehicles & tables)
+  const crowd: DhabaCrowdPerson[] = [];
+  const crowdSpecs: Array<[number, number, number, number]> = [
+    [hallX - 4.8, -8.2, 0.55, 1.4],
+    [hallX - 5.6, -5.2, 1.2, 1.1],
+    [hallX - 5.2, -2.1, 0.45, 0.9],
+    [hallX - 6.0, 0.8, 1.45, 1.25],
+    [hallX - 4.6, 3.2, 0.5, 1.0],
+    [hallX - 5.8, 6.2, 1.15, 1.15],
+    [hallX - 7.8, -1.5, 1.8, 1.3],
+    [hallX - 7.2, 4.5, 1.6, 1.2],
+    [hallX - 3.4, -9.8, 0.4, 1.6],
+  ];
+  crowdSpecs.forEach(([cx, cz, radius, speed], idx) => {
+    const person = buildDhabaGuestPerson(idx * 17 + title.length);
+    person.position.set(cx, 0.06, cz);
+    group.add(person);
+    crowd.push({
+      mesh: person,
+      baseX: cx,
+      baseZ: cz,
+      walkRadius: radius,
+      walkSpeed: speed,
+      phase: idx * 1.37,
+    });
+  });
+
+  // 4. Dynamic Visiting Vehicles (Bikes, Cars, SUV, Visiting Bus) that Arrive -> Park -> Depart!
+  const visitors: DhabaVisitorVehicle[] = [];
+  const seedBase = title.length * 7;
+
+  // Visitor A: Indian Motorcycle + Rider
+  const bike1 = buildIndianMotorcycleWithRider(seedBase + 1);
+  group.add(bike1.group);
+  visitors.push({
+    mesh: bike1.group,
+    riderGroup: bike1.riderGroup,
+    kind: 'bike',
+    parkLocalX: halfW + 9.2,
+    parkLocalZ: -7.8,
+    parkYaw: 0.95,
+    entryZ: -26,
+    exitZ: 28,
+    roadEdgeX: halfW - 1.3,
+    cycleDuration: 26,
+    phaseTime: 4.5,
+  });
+
+  // Visitor B: Second Motorcycle + Rider (offset cycle so bikes come & go!)
+  const bike2 = buildIndianMotorcycleWithRider(seedBase + 4);
+  group.add(bike2.group);
+  visitors.push({
+    mesh: bike2.group,
+    riderGroup: bike2.riderGroup,
+    kind: 'bike',
+    parkLocalX: halfW + 9.6,
+    parkLocalZ: -4.6,
+    parkYaw: 1.05,
+    entryZ: -26,
+    exitZ: 28,
+    roadEdgeX: halfW - 1.3,
+    cycleDuration: 29,
+    phaseTime: 16.5,
+  });
+
+  // Visitor C: Maruti Swift Hatchback Car
+  const car = buildIndianTrafficVehicle('swift_car', seedBase + 2);
+  group.add(car.group);
+  visitors.push({
+    mesh: car.group,
+    kind: 'car',
+    parkLocalX: halfW + 8.6,
+    parkLocalZ: 0.6,
+    parkYaw: 0.62,
+    entryZ: -30,
+    exitZ: 32,
+    roadEdgeX: halfW - 1.5,
+    cycleDuration: 34,
+    phaseTime: 11.0,
+  });
+
+  // Visitor D: Mahindra Bolero SUV
+  const suv = buildIndianTrafficVehicle('suv_bolero', seedBase + 5);
+  group.add(suv.group);
+  visitors.push({
+    mesh: suv.group,
+    kind: 'suv',
+    parkLocalX: halfW + 8.8,
+    parkLocalZ: 6.4,
+    parkYaw: 0.55,
+    entryZ: -30,
+    exitZ: 32,
+    roadEdgeX: halfW - 1.5,
+    cycleDuration: 38,
+    phaseTime: 25.0,
+  });
+
+  // Visitor E: Visiting HRTC / Private Highway Bus (uses front-north coach slot Z = +11.5 so player's bay at Z = -6.5 stays clear!)
+  const visitBus = buildIndianTrafficVehicle(seedBase % 2 === 0 ? 'hrtc_bus' : 'private_bus', seedBase + 3);
+  group.add(visitBus.group);
+  visitors.push({
+    mesh: visitBus.group,
+    kind: 'bus',
+    parkLocalX: halfW + 4.3,
+    parkLocalZ: 10.5,
+    parkYaw: 0.12,
+    entryZ: -34,
+    exitZ: 36,
+    roadEdgeX: halfW - 1.7,
+    cycleDuration: 46,
+    phaseTime: 14.0,
+  });
+
+  const busBayWorldPos = pos
+    .clone()
+    .addScaledVector(left, busBayX)
+    .addScaledVector(tan, busBayZ);
+
+  return {
+    id,
+    title,
+    position: pos.clone(),
+    busBayWorldPos,
+    tangent: tan.clone(),
+    right,
+    group,
+    visitors,
+    crowd,
+    nightLightMats,
+    dhabaPointLight,
+  };
+}
+
+/**
+ * Animates a Dhaba's arriving/parking/departing bikes, cars & buses, mingling crowd, and night lights.
+ */
+export function updateDhabaComplex(
+  dhaba: DhabaComplexData,
+  dt: number,
+  elapsed: number,
+  nightFactor: number
+): void {
+  // Brighten warm Dhaba signage, fairy lights & courtyard point light at dusk/night
+  const emissiveVal = 0.35 + nightFactor * 1.25;
+  for (const m of dhaba.nightLightMats) {
+    m.emissiveIntensity = emissiveVal;
+  }
+  dhaba.dhabaPointLight.intensity = 0.3 + nightFactor * 4.2;
+
+  // Animate mingling Dhaba crowd walking casually between tables and parking yard
+  for (const p of dhaba.crowd) {
+    const a = elapsed * p.walkSpeed * 0.48 + p.phase;
+    const x = p.baseX + Math.cos(a) * p.walkRadius;
+    const z = p.baseZ + Math.sin(a * 0.8) * p.walkRadius;
+    const dx = -Math.sin(a) * p.walkRadius;
+    const dz = Math.cos(a * 0.8) * p.walkRadius * 0.8;
+    p.mesh.position.set(x, 0.06 + Math.abs(Math.sin(elapsed * 4.5 + p.phase)) * 0.04, z);
+    if (dx * dx + dz * dz > 0.001) {
+      p.mesh.rotation.y = Math.atan2(dx, dz);
+    }
+  }
+
+  // Animate visiting cars, bikes & buses: Arrive from highway -> Park at Dhaba -> Depart onto highway!
+  for (const v of dhaba.visitors) {
+    v.phaseTime = (v.phaseTime + dt) % v.cycleDuration;
+    const frac = v.phaseTime / v.cycleDuration;
+
+    // 0.00..0.18: Arriving from highway into parking bay
+    // 0.18..0.70: Parked at Dhaba (rider gets off bike while eating!)
+    // 0.70..0.88: Pulling out & departing back onto highway
+    // 0.88..1.00: Away on highway (hidden before next arrival)
+    if (frac < 0.18) {
+      v.mesh.visible = true;
+      if (v.riderGroup) v.riderGroup.visible = true;
+      const u = frac / 0.18;
+      const smooth = u * u * (3 - 2 * u);
+      const x = THREE.MathUtils.lerp(v.roadEdgeX, v.parkLocalX, Math.pow(smooth, 0.85));
+      const z = THREE.MathUtils.lerp(v.entryZ, v.parkLocalZ, smooth);
+      const nextU = Math.min(1, u + 0.04);
+      const nextSmooth = nextU * nextU * (3 - 2 * nextU);
+      const nx = THREE.MathUtils.lerp(v.roadEdgeX, v.parkLocalX, Math.pow(nextSmooth, 0.85));
+      const nz = THREE.MathUtils.lerp(v.entryZ, v.parkLocalZ, nextSmooth);
+      v.mesh.position.set(x, 0.06, z);
+      v.mesh.rotation.y = Math.atan2(nx - x, nz - z);
+    } else if (frac < 0.70) {
+      v.mesh.visible = true;
+      if (v.riderGroup) v.riderGroup.visible = false;
+      v.mesh.position.set(v.parkLocalX, 0.06, v.parkLocalZ);
+      v.mesh.rotation.y = v.parkYaw;
+    } else if (frac < 0.88) {
+      v.mesh.visible = true;
+      if (v.riderGroup) v.riderGroup.visible = true;
+      const u = (frac - 0.70) / 0.18;
+      const smooth = u * u * (3 - 2 * u);
+      const x = THREE.MathUtils.lerp(v.parkLocalX, v.roadEdgeX, Math.pow(smooth, 1.15));
+      const z = THREE.MathUtils.lerp(v.parkLocalZ, v.exitZ, smooth);
+      const nextU = Math.min(1, u + 0.04);
+      const nextSmooth = nextU * nextU * (3 - 2 * nextU);
+      const nx = THREE.MathUtils.lerp(v.parkLocalX, v.roadEdgeX, Math.pow(nextSmooth, 1.15));
+      const nz = THREE.MathUtils.lerp(v.parkLocalZ, v.exitZ, nextSmooth);
+      v.mesh.position.set(x, 0.06, z);
+      v.mesh.rotation.y = Math.atan2(nx - x, nz - z);
+    } else {
+      v.mesh.visible = false;
+    }
+  }
 }
 

@@ -2,10 +2,13 @@ import * as THREE from 'three';
 import type { EndlessBiome } from '../types/simulator';
 import {
   buildCurvedMountainTunnel,
+  buildDynamicDhabaComplex,
   buildIndianTrafficVehicle,
   buildPahadiMountainHouse,
   buildRoadLandslideZone,
   createHighDetailAsphaltTexture,
+  updateDhabaComplex,
+  type DhabaComplexData,
   type LandslideZoneData,
   type TrafficKind,
 } from './sceneryAndTraffic';
@@ -43,6 +46,7 @@ interface EndlessChunk {
   group: THREE.Group;
   samples: EndlessSamplePoint[];
   landslide: LandslideZoneData | null;
+  dhaba: DhabaComplexData | null;
 }
 
 export interface EndlessWorldHandle {
@@ -53,6 +57,7 @@ export interface EndlessWorldHandle {
   startPos: THREE.Vector3;
   startHeading: number;
   getLandslides: () => LandslideZoneData[];
+  getDhabas: () => DhabaComplexData[];
   sampleRoadAt: (pos: THREE.Vector3) => {
     sMeters: number;
     point: THREE.Vector3;
@@ -70,7 +75,8 @@ export interface EndlessWorldHandle {
     busHeading: number,
     busSpeedMs: number,
     hornBlowing: boolean,
-    isRaining: boolean
+    isRaining: boolean,
+    nightFactor?: number
   ) => void;
   dispose: () => void;
 }
@@ -245,6 +251,8 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     const hasMountainTunnel = biome === 'mountain' && idx > 0 && idx % 3 === 1;
     const tunnelTStart = 0.42;
     const tunnelTEnd = 0.62;
+    const hasDhaba = !hasMountainTunnel && (idx === 0 || idx % 2 === 1);
+    const dhabaT = 0.62;
 
     for (let i = 0; i <= segs; i++) {
       const t = i / segs;
@@ -283,14 +291,16 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const rFloorY = THREE.MathUtils.lerp(pPrev.rFloorY, pCur.rFloorY, blend);
 
       const inTunnel = hasMountainTunnel && t >= tunnelTStart - 0.02 && t <= tunnelTEnd + 0.02;
-      const lShoulderOut = inTunnel ? 8.5 : 4.2;
+      const nearDhaba = hasDhaba && Math.abs(t - dhabaT) < 0.14;
+      const lShoulderOut = nearDhaba ? 24.5 : inTunnel ? 8.5 : 4.2;
+      const lMidOut = nearDhaba ? 40 : 24;
 
       const c0 = p.clone().addScaledVector(leftVec, halfW + 0.1);
       const c1 = p.clone().addScaledVector(leftVec, halfW + lShoulderOut);
       const c2 = p
         .clone()
-        .addScaledVector(leftVec, halfW + 24)
-        .add(new THREE.Vector3(0, (inTunnel ? 8 : lMidY) + Math.sin(t * 14 + seed) * (biome === 'plains' ? 0.3 : 3.2), 0));
+        .addScaledVector(leftVec, halfW + lMidOut)
+        .add(new THREE.Vector3(0, (inTunnel ? 8 : nearDhaba ? Math.min(lMidY, 10) : lMidY) + Math.sin(t * 14 + seed) * (biome === 'plains' ? 0.3 : 3.2), 0));
       const c3 = p
         .clone()
         .addScaledVector(leftVec, halfW + 92)
@@ -432,6 +442,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const tan = curve.getTangentAt(t).normalize();
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const rightSide = i % 2 === 0;
+      if (!rightSide && hasDhaba && Math.abs(t - dhabaT) < 0.14) continue;
       const off = 1.2 + ((i * 19) % 70) * 0.15;
       const distOut = rightSide ? halfW + off : -(halfW + off);
       const yOff =
@@ -475,6 +486,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const tan = curve.getTangentAt(t).normalize();
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const rightSide = i % 2 === 0;
+      if (!rightSide && hasDhaba && Math.abs(t - dhabaT) < 0.15) continue;
       const off = 9.5 + (i % 7) * 5.2;
       const distOut = rightSide ? halfW + off : -(halfW + off);
       const yOff =
@@ -515,6 +527,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
       const left = right.clone().negate();
       const onLeft = (idx + h) % 2 === 0;
+      if (onLeft && hasDhaba && Math.abs(t - dhabaT) < 0.16) continue;
       const house = biome === 'plains' ? buildPlainsVillageHouse(idx * 7 + h) : buildPahadiMountainHouse(idx * 11 + h);
       const distOut = halfW + 13.5 + (h % 2) * 4.5;
       house.position.copy(p).addScaledVector(onLeft ? left : right, distOut);
@@ -540,10 +553,34 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       group.add(tunnel);
     }
 
-    // Random Half-Road Mountain / Foothill Landslide (~45% of non-tunnel hill chunks)
+    // Lively Indian Highway Dhaba Stop with Bus Parking Bay + Arriving/Departing Cars, Bikes & Buses!
+    let dhaba: DhabaComplexData | null = null;
+    if (hasDhaba) {
+      const dhabaNames: Array<[string, string]> = [
+        ['SHER-E-PUNJAB HIGHWAY DHABA', 'शेर-ए-पंजाब ढाबा'],
+        ['HIMACHAL VAISHNO DHABA', 'हिमाचल वैष्णो ढाबा'],
+        ['HARYANA CHAI & PARANTHA DHABA', 'हरियाणा चाय परांठा ढाबा'],
+        ['SHIVALIK PAHADI DHABA', 'शिवालिक पहाड़ी ढाबा'],
+      ];
+      const [dTitle, dHindi] = dhabaNames[idx % dhabaNames.length];
+      const dPos = curve.getPointAt(dhabaT);
+      const dTan = curve.getTangentAt(dhabaT).normalize();
+      dhaba = buildDynamicDhabaComplex(
+        `endless-dhaba-${idx}`,
+        dTitle,
+        dHindi,
+        dPos,
+        dTan,
+        roadWidth,
+        maxAniso
+      );
+      group.add(dhaba.group);
+    }
+
+    // Random Half-Road Mountain / Foothill Landslide (~45% of non-tunnel hill chunks, avoiding Dhaba zone)
     let landslide: LandslideZoneData | null = null;
     if (biome !== 'plains' && !hasMountainTunnel && idx > 0 && Math.random() < 0.48) {
-      const lsT = 0.32 + Math.random() * 0.36;
+      const lsT = hasDhaba ? 0.24 + Math.random() * 0.14 : 0.32 + Math.random() * 0.36;
       const lsPos = curve.getPointAt(lsT);
       const lsTan = curve.getTangentAt(lsT).normalize();
       const builtLs = buildRoadLandslideZone(
@@ -559,7 +596,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     }
 
     root.add(group);
-    return { index: idx, biome, startS, endS, group, samples, landslide };
+    return { index: idx, biome, startS, endS, group, samples, landslide, dhaba };
   };
 
   // Bootstrap initial 4 seamless highway chunks (~2,100m ahead)
@@ -692,6 +729,14 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     return list;
   }
 
+  function getDhabas(): DhabaComplexData[] {
+    const list: DhabaComplexData[] = [];
+    for (const ch of chunks) {
+      if (ch.dhaba) list.push(ch.dhaba);
+    }
+    return list;
+  }
+
   function updateWorld(
     dt: number,
     elapsed: number,
@@ -699,7 +744,8 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     _busHeading: number,
     _busSpeedMs: number,
     hornBlowing: boolean,
-    isRaining: boolean
+    isRaining: boolean,
+    nightFactor = 0
   ) {
     // Stream new chunks ahead and recycle far-behind chunks seamlessly
     const lastChunk = chunks[chunks.length - 1];
@@ -710,6 +756,13 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
       const old = chunks.shift()!;
       root.remove(old.group);
       disposeObject(old.group);
+    }
+
+    // Animate roadside Dhaba stops (arriving/parking/departing bikes, cars & buses + crowd + night lights)
+    for (const ch of chunks) {
+      if (ch.dhaba) {
+        updateDhabaComplex(ch.dhaba, dt, elapsed, nightFactor);
+      }
     }
 
     const activeLandslides = getLandslides();
@@ -877,6 +930,7 @@ export function buildEndlessMountainWorld(renderer: THREE.WebGLRenderer): Endles
     startPos,
     startHeading,
     getLandslides,
+    getDhabas,
     sampleRoadAt,
     updateWorld,
     dispose,

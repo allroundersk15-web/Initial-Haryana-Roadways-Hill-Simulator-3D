@@ -31,7 +31,8 @@ export interface BusVisualRig {
   setSteeringAngle: (angleRad: number) => void;
   setGearStick: (gear: number) => void;
   spinWheels: (distDelta: number) => void;
-  updateWipers: (time: number, on: boolean) => void;
+  updateWipers: (time: number, on: boolean, isRaining?: boolean, dt?: number) => void;
+  setMirrorTextures: (rearTex: THREE.Texture | null, rightWingTex: THREE.Texture | null) => void;
   updateDriverAndConductor: (
     dt: number,
     elapsed: number,
@@ -917,12 +918,55 @@ export function buildHaryanaRoadwaysBus(
   ledBoard.position.set(0, 3.04, 5.56);
   bodyGroup.add(ledBoard);
 
-  // 7. Split Panoramic Front Windshield & Side Window Pillars
+  // 7. Split Panoramic Front Windshield, Interactive Raindrop Wipe Layer & Side Window Pillars
   const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.42, 1.12, 0.06), glassMat);
   windshield.position.set(0, 2.46, 5.47);
   windshield.rotation.x = -0.08;
   windshield.renderOrder = 3;
   bodyGroup.add(windshield);
+
+  // Dynamic Windshield Raindrop Canvas Layer (visibly wiped clean in real time by the wipers in rain!)
+  const rainGlassCanvas = document.createElement('canvas');
+  rainGlassCanvas.width = 512;
+  rainGlassCanvas.height = 256;
+  const rainGlassCtx = rainGlassCanvas.getContext('2d')!;
+  const rainGlassTex = new THREE.CanvasTexture(rainGlassCanvas);
+  const rainGlassMat = new THREE.MeshBasicMaterial({
+    map: rainGlassTex,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const rainGlassMesh = new THREE.Mesh(new THREE.PlaneGeometry(2.38, 1.08), rainGlassMat);
+  rainGlassMesh.position.set(0, 2.46, 5.43);
+  rainGlassMesh.rotation.x = -0.08;
+  rainGlassMesh.rotation.y = Math.PI;
+  rainGlassMesh.renderOrder = 4;
+  rainGlassMesh.visible = false;
+  bodyGroup.add(rainGlassMesh);
+
+  interface RainDrop {
+    x: number;
+    y: number;
+    r: number;
+    vy: number;
+    alpha: number;
+  }
+  const glassDrops: RainDrop[] = [];
+  for (let i = 0; i < 160; i++) {
+    glassDrops.push({
+      x: Math.random() * 512,
+      y: Math.random() * 256,
+      r: 1.6 + Math.random() * 2.8,
+      vy: 36 + Math.random() * 75,
+      alpha: 0.45 + Math.random() * 0.45,
+    });
+  }
+  let rainGlassTimer = 0;
+  let currentWiperAngle = -0.78;
+  let prevWiperAngle = -0.78;
+  let rainGlassWetness = 0;
 
   const centerMullion = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.18, 0.12), chassisDarkMat);
   centerMullion.position.set(0, 2.46, 5.47);
@@ -1087,13 +1131,22 @@ export function buildHaryanaRoadwaysBus(
   sunVisor.rotation.x = 0.2;
   bodyGroup.add(sunVisor);
 
-  const cabinMirror = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 0.04), chassisDarkMat);
-  cabinMirror.position.set(-0.08, 2.82, 5.22);
-  bodyGroup.add(cabinMirror);
-  const cabinMirrorGlass = new THREE.Mesh(new THREE.PlaneGeometry(0.28, 0.075), chromeMat);
-  cabinMirrorGlass.position.set(-0.08, 2.82, 5.195);
+  // Real-Time Working Interior Rear-View Mirror (angled cleanly toward RHD driver)
+  const cabinMirrorGroup = new THREE.Group();
+  cabinMirrorGroup.position.set(-0.34, 2.66, 5.12);
+  cabinMirrorGroup.rotation.y = -0.18;
+  cabinMirrorGroup.rotation.x = 0.05;
+  const cabinMirrorFrame = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.15, 0.04), chassisDarkMat);
+  cabinMirrorGroup.add(cabinMirrorFrame);
+  const cabinMirrorStem = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.24, 8), chassisDarkMat);
+  cabinMirrorStem.position.set(0, 0.18, 0.02);
+  cabinMirrorGroup.add(cabinMirrorStem);
+  const cabinMirrorMat = new THREE.MeshBasicMaterial({ color: 0xcbd5e1 });
+  const cabinMirrorGlass = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.12), cabinMirrorMat);
+  cabinMirrorGlass.position.set(0, 0, -0.024);
   cabinMirrorGlass.rotation.y = Math.PI;
-  bodyGroup.add(cabinMirrorGlass);
+  cabinMirrorGroup.add(cabinMirrorGlass);
+  bodyGroup.add(cabinMirrorGroup);
 
   // Decorative Marigold / Saffron Dashboard Idol & Garland Accent
   const idolBase = new THREE.Mesh(
@@ -1413,33 +1466,66 @@ export function buildHaryanaRoadwaysBus(
   doorLeaf2.add(leaf2Glass);
   bodyGroup.add(doorLeaf2);
 
-  // 10. Twin Extended Side Wing Mirrors
+  // 10. Twin Extended Real-Time Side Wing Mirrors (Right driver-side mirror angled clearly into cockpit view!)
+  const leftWingMirrorMat = new THREE.MeshBasicMaterial({ color: 0xcbd5e1 });
+  const rightWingMirrorMat = new THREE.MeshBasicMaterial({ color: 0xcbd5e1 });
   for (const sx of [-1, 1]) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.04, 0.04), chassisDarkMat);
-    arm.position.set(sx * 1.4, 2.48, 5.36);
-    bodyGroup.add(arm);
-    const housing = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.42, 0.08), chassisDarkMat);
-    housing.position.set(sx * 1.56, 2.32, 5.42);
-    bodyGroup.add(housing);
-    const mirrorGlass = new THREE.Mesh(new THREE.PlaneGeometry(0.11, 0.36), chromeMat);
-    mirrorGlass.position.set(sx * 1.56, 2.32, 5.37);
+    const mirrorUnit = new THREE.Group();
+    mirrorUnit.position.set(sx * 1.46, 2.34, 5.34);
+    mirrorUnit.rotation.y = sx < 0 ? 0.18 : -0.18;
+
+    const armTop = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.036, 0.036), chassisDarkMat);
+    armTop.position.set(-sx * 0.15, 0.16, -0.04);
+    mirrorUnit.add(armTop);
+    const armBot = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.036, 0.036), chassisDarkMat);
+    armBot.position.set(-sx * 0.15, -0.16, -0.04);
+    mirrorUnit.add(armBot);
+
+    const housing = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.46, 0.07), chassisDarkMat);
+    mirrorUnit.add(housing);
+
+    const mirrorGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.15, 0.41),
+      sx < 0 ? rightWingMirrorMat : leftWingMirrorMat
+    );
+    mirrorGlass.position.set(0, 0, -0.039);
     mirrorGlass.rotation.y = Math.PI;
-    bodyGroup.add(mirrorGlass);
+    mirrorUnit.add(mirrorGlass);
+    bodyGroup.add(mirrorUnit);
   }
 
-  // 11. Animated Windshield Wipers
-  const wiperLeft = new THREE.Group();
-  wiperLeft.position.set(0.55, 1.92, 5.56);
-  const blade1 = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.72, 0.03), chassisDarkMat);
-  blade1.position.y = 0.36;
-  wiperLeft.add(blade1);
+  // 11. Upgraded Articulated Pantograph Windshield Wipers (clearly visible from inside cockpit & exterior)
+  const wiperRubberMat = new THREE.MeshStandardMaterial({ color: 0x0b0f17, roughness: 0.78 });
+  const buildPantographWiper = (xPos: number) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(xPos, 1.92, 5.52);
+    pivot.rotation.x = -0.08;
+
+    // Pivot boss mount
+    const boss = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.038, 0.05, 10), chassisDarkMat);
+    boss.rotation.x = Math.PI / 2;
+    pivot.add(boss);
+
+    // Main wiper arm + parallel pantograph strut
+    const mainArm = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.62, 0.022), chassisDarkMat);
+    mainArm.position.set(0, 0.31, 0.015);
+    pivot.add(mainArm);
+    const subArm = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.56, 0.014), chassisDarkMat);
+    subArm.position.set(0.026, 0.29, 0.018);
+    pivot.add(subArm);
+
+    // Wide heavy-bus rubber squeegee blade
+    const bladeCarrier = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.58, 0.024), wiperRubberMat);
+    bladeCarrier.position.set(0, 0.62, 0.008);
+    pivot.add(bladeCarrier);
+
+    return pivot;
+  };
+
+  const wiperLeft = buildPantographWiper(0.56);
   bodyGroup.add(wiperLeft);
 
-  const wiperRight = new THREE.Group();
-  wiperRight.position.set(-0.55, 1.92, 5.56);
-  const blade2 = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.72, 0.03), chassisDarkMat);
-  blade2.position.y = 0.36;
-  wiperRight.add(blade2);
+  const wiperRight = buildPantographWiper(-0.56);
   bodyGroup.add(wiperRight);
 
   // 12. Functional Lights
@@ -1608,10 +1694,114 @@ export function buildHaryanaRoadwaysBus(
         w.rotation.x += dRot;
       }
     },
-    updateWipers(time: number, on: boolean) {
-      const target = on ? Math.sin(time * 5.6) * 0.65 : -0.6;
-      wiperLeft.rotation.z = target;
-      wiperRight.rotation.z = target;
+    setMirrorTextures(rearTex: THREE.Texture | null, rightWingTex: THREE.Texture | null) {
+      cabinMirrorMat.map = rearTex;
+      cabinMirrorMat.color.setHex(rearTex ? 0xffffff : 0xcbd5e1);
+      cabinMirrorMat.needsUpdate = true;
+
+      leftWingMirrorMat.map = rearTex;
+      leftWingMirrorMat.color.setHex(rearTex ? 0xffffff : 0xcbd5e1);
+      leftWingMirrorMat.needsUpdate = true;
+
+      rightWingMirrorMat.map = rightWingTex || rearTex;
+      rightWingMirrorMat.color.setHex(rightWingTex || rearTex ? 0xffffff : 0xcbd5e1);
+      rightWingMirrorMat.needsUpdate = true;
+    },
+    updateWipers(time: number, on: boolean, isRaining = false, dt = 0.016) {
+      prevWiperAngle = currentWiperAngle;
+      const targetAngle = on ? Math.sin(time * 4.8) * 0.74 : -0.82;
+      currentWiperAngle = THREE.MathUtils.damp(currentWiperAngle, targetAngle, on ? 18 : 7, dt);
+      wiperLeft.rotation.z = currentWiperAngle;
+      wiperRight.rotation.z = currentWiperAngle;
+
+      // Smoothly build or dry windshield raindrop film
+      rainGlassWetness = THREE.MathUtils.damp(rainGlassWetness, isRaining ? 1 : 0, isRaining ? 1.8 : 1.2, dt);
+      if (rainGlassWetness < 0.02) {
+        rainGlassMesh.visible = false;
+        return;
+      }
+
+      rainGlassMesh.visible = true;
+      rainGlassMat.opacity = rainGlassWetness * 0.88;
+
+      rainGlassTimer += dt;
+      if (rainGlassTimer < 0.055) return; // ~18 FPS canvas update for crisp & fast rain wipe!
+      const stepDt = rainGlassTimer;
+      rainGlassTimer = 0;
+
+      // Clear & repaint translucent rain mist + falling droplets
+      rainGlassCtx.clearRect(0, 0, 512, 256);
+      rainGlassCtx.fillStyle = 'rgba(186, 212, 238, 0.14)';
+      rainGlassCtx.fillRect(0, 0, 512, 256);
+
+      // Compute active wiper blade sweep angles in canvas space (pivots at bottom left/right quarters)
+      const pivotsX = [135, 377];
+      const pivotY = 252;
+      const aMin = Math.min(prevWiperAngle, currentWiperAngle) - 0.14;
+      const aMax = Math.max(prevWiperAngle, currentWiperAngle) + 0.14;
+
+      for (const d of glassDrops) {
+        d.y += d.vy * stepDt;
+        if (d.y > 260) {
+          d.y = -4;
+          d.x = Math.random() * 512;
+        }
+
+        // Check if droplet sits inside the freshly wiped fan behind the wiper blade
+        let wiped = false;
+        if (on) {
+          for (const px of pivotsX) {
+            const dx = d.x - px;
+            const dy = pivotY - d.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > 44 && dist < 218) {
+              const ang = Math.atan2(dx, dy);
+              // Clear a clean arc around the moving blade + soft trailing wiped zone
+              if (ang >= aMin - 0.25 && ang <= aMax + 0.25) {
+                wiped = true;
+                break;
+              }
+            }
+          }
+        }
+        if (wiped) {
+          // Push wiped droplet to outer edge so glass looks visibly clean!
+          d.y = Math.random() * 30;
+          continue;
+        }
+
+        // Draw glistening raindrop + subtle downward water streak
+        rainGlassCtx.strokeStyle = `rgba(224, 242, 254, ${d.alpha * 0.55})`;
+        rainGlassCtx.lineWidth = d.r * 0.65;
+        rainGlassCtx.beginPath();
+        rainGlassCtx.moveTo(d.x, d.y - d.r * 3.2);
+        rainGlassCtx.lineTo(d.x, d.y);
+        rainGlassCtx.stroke();
+
+        rainGlassCtx.fillStyle = `rgba(240, 249, 255, ${d.alpha})`;
+        rainGlassCtx.beginPath();
+        rainGlassCtx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        rainGlassCtx.fill();
+      }
+
+      // Erase twin crystal-clear arcs swept by the rubber wiper blades
+      if (on) {
+        rainGlassCtx.save();
+        rainGlassCtx.globalCompositeOperation = 'destination-out';
+        for (const px of pivotsX) {
+          rainGlassCtx.beginPath();
+          rainGlassCtx.moveTo(px, pivotY);
+          const startCanvasA = -Math.PI * 0.5 + THREE.MathUtils.clamp(currentWiperAngle - 0.52, -0.78, 0.78);
+          const endCanvasA = -Math.PI * 0.5 + THREE.MathUtils.clamp(currentWiperAngle + 0.52, -0.78, 0.78);
+          rainGlassCtx.arc(px, pivotY, 215, startCanvasA, endCanvasA);
+          rainGlassCtx.closePath();
+          rainGlassCtx.fillStyle = 'rgba(0,0,0,0.92)';
+          rainGlassCtx.fill();
+        }
+        rainGlassCtx.restore();
+      }
+
+      rainGlassTex.needsUpdate = true;
     },
     updateDriverAndConductor(
       dt: number,

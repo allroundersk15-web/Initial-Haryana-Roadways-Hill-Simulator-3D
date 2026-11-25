@@ -19,7 +19,7 @@ import type {
 } from '../types/simulator';
 import { buildHaryanaRoadwaysBus, type BusVisualRig, type ConductorMode } from './busBuilder';
 import { buildEndlessMountainWorld, type EndlessWorldHandle } from './endlessWorldBuilder';
-import { createSkyGradientDome, type LandslideZoneData } from './sceneryAndTraffic';
+import { createSkyGradientDome, type DhabaComplexData, type LandslideZoneData } from './sceneryAndTraffic';
 import { buildTrainingGroundArena, type TrainingArenaHandle } from './trainingBuilder';
 import { buildHimachalMountainWorld, type HimachalWorldHandle } from './worldBuilder';
 
@@ -31,6 +31,7 @@ export interface BusSimController {
   setIndicator: (mode: 'off' | 'left' | 'right' | 'hazard') => void;
   toggleWipers: () => void;
   cycleCamera: () => void;
+  cycleTimeOfDay: () => void;
   resetCameraLook: () => void;
   toggleTransmission: () => void;
   shiftGear: (delta: 1 | -1) => void;
@@ -85,6 +86,33 @@ const _doorWorld = new THREE.Vector3();
 const _busPosVec = new THREE.Vector3();
 const _cornerVec = new THREE.Vector3();
 const _lookDir = new THREE.Vector3();
+const _mirrorPos = new THREE.Vector3();
+const _mirrorLook = new THREE.Vector3();
+const _daySunColor = new THREE.Color();
+const _dayBgColor = new THREE.Color();
+const _dayFogColor = new THREE.Color();
+const _dayHemiSky = new THREE.Color();
+const _dayHemiGround = new THREE.Color();
+
+function formatTimeOfDayLabel(hours: number): string {
+  const hNorm = ((hours % 24) + 24) % 24;
+  const hh = Math.floor(hNorm);
+  const mm = Math.floor((hNorm - hh) * 60);
+  const clock = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  const phase =
+    hNorm < 5.2 || hNorm >= 20.0
+      ? 'Night'
+      : hNorm < 7.2
+        ? 'Dawn'
+        : hNorm < 12.0
+          ? 'Morning'
+          : hNorm < 16.5
+            ? 'Day'
+            : hNorm < 18.8
+              ? 'Sunset'
+              : 'Dusk';
+  return `${clock} ${phase}`;
+}
 
 function detectSoftwareGl(): boolean {
   try {
@@ -247,6 +275,11 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     wipersOn: weather === 'rain',
     cameraMode: 'chase' as CameraMode,
     weather: weather as WeatherPreset,
+    timeOfDayHours: weather === 'night' ? 21.4 : 9.5,
+    prevBrakeHeld: false,
+    brakePressDuration: 0,
+    lastBrakeSpeedMs: 0,
+    autoNightLightsDone: weather === 'night',
     fuelPct: 96,
     airPressurePsi: 118,
     passengersOnBoard: 6,
@@ -328,7 +361,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     toggleHandbrake() {
       const s = simRef.current;
       s.handbrake = !s.handbrake;
-      audioRef.current?.playPneumaticHiss(0.32);
+      audioRef.current?.playAirBrakeRelease(0.85);
       showNotice(s.handbrake ? 'Air Parking Handbrake ENGAGED' : 'Handbrake RELEASED', 'info', 1.8);
     },
     cycleHeadlights() {
@@ -358,11 +391,26 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       simRef.current.lookPitch = 0;
       showNotice(
         simRef.current.cameraMode === 'cabin'
-          ? 'Camera: CABIN — Drag screen to look 360° around cockpit'
+          ? 'Camera: CABIN — Live mirrors active · Drag to look 360°'
           : `Camera: ${simRef.current.cameraMode.toUpperCase()}`,
         'info',
         2.2
       );
+    },
+    cycleTimeOfDay() {
+      const s = simRef.current;
+      const presets = [6.1, 9.5, 14.0, 17.65, 21.5];
+      const next = presets.find((p) => p > s.timeOfDayHours + 0.6) ?? presets[0];
+      s.timeOfDayHours = next;
+      const isDark = next >= 19.0 || next < 5.6;
+      if (isDark && s.headlights === 0) {
+        s.headlights = 2;
+        s.cabinLight = true;
+      } else if (!isDark && s.headlights === 2 && s.weather !== 'night') {
+        s.headlights = 0;
+        s.cabinLight = false;
+      }
+      showNotice(`Time of Day: ${formatTimeOfDayLabel(next)}`, 'info', 2.0);
     },
     resetCameraLook() {
       simRef.current.lookYaw = 0;
@@ -395,9 +443,14 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         if (nextRange !== s.autoRange) {
           s.autoRange = nextRange;
           s.gear = nextRange === 'R' ? -1 : nextRange === 'N' ? 0 : Math.max(1, s.gear);
-          s.shiftCutTimer = 0.09;
+          s.shiftCutTimer = 0.06;
           audioRef.current?.playGearShift(nextRange === 'R');
         }
+        return;
+      }
+      // Prevent accidentally dropping into Neutral (0) while driving forward in 1st gear!
+      if (delta === -1 && s.gear === 1 && s.speedMs > 1.8) {
+        showNotice('Already in 1st gear — slow down to shift into N / R', 'info', 1.6);
         return;
       }
       const next = THREE.MathUtils.clamp(s.gear + delta, -1, 6);
@@ -407,7 +460,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           return;
         }
         s.gear = next;
-        s.shiftCutTimer = 0.11;
+        s.shiftCutTimer = 0.055;
         audioRef.current?.playGearShift(next === -1);
       }
     },
@@ -423,7 +476,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       }
       if (clamped !== s.gear) {
         s.gear = clamped;
-        s.shiftCutTimer = 0.11;
+        s.shiftCutTimer = 0.055;
         audioRef.current?.playGearShift(clamped === -1);
       }
     },
@@ -437,7 +490,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       if (s.autoRange !== range) {
         s.autoRange = range;
         s.gear = range === 'R' ? -1 : range === 'N' ? 0 : Math.max(1, s.gear);
-        s.shiftCutTimer = 0.09;
+        s.shiftCutTimer = 0.06;
         audioRef.current?.playGearShift(range === 'R');
       }
     },
@@ -445,10 +498,16 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       simRef.current.weather = w;
       simRef.current.wipersOn = w === 'rain';
       if (w === 'night') {
+        simRef.current.timeOfDayHours = 21.4;
         simRef.current.headlights = 2;
         simRef.current.cabinLight = true;
-      } else if (w === 'mist') {
-        simRef.current.headlights = 1;
+      } else {
+        if (simRef.current.timeOfDayHours >= 20 || simRef.current.timeOfDayHours < 5.5) {
+          simRef.current.timeOfDayHours = 9.5;
+        }
+        if (w === 'mist') {
+          simRef.current.headlights = 1;
+        }
       }
       weatherUpdaterRef.current?.(w);
     },
@@ -479,6 +538,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
   useEffect(() => {
     simRef.current.needsWorldRebuild = true;
     simRef.current.weather = weather;
+    simRef.current.timeOfDayHours = weather === 'night' ? 21.4 : 9.5;
+    simRef.current.autoNightLightsDone = weather === 'night';
     simRef.current.wipersOn = weather === 'rain';
     simRef.current.headlights = weather === 'night' ? 2 : weather === 'mist' ? 1 : 0;
     simRef.current.cabinLight = weather === 'night';
@@ -620,9 +681,9 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     scene.environment = envRT.texture;
     pmremGenerator.dispose();
 
-    // Procedural Gradient Sky Dome for richer outdoor atmosphere
+    // Dynamic 24-Hour Day-Night Sky Dome (Sun, Moon & Starfield)
     const skyDome = createSkyGradientDome();
-    scene.add(skyDome.mesh);
+    scene.add(skyDome.group);
 
     // Upgraded 3-Point Outdoor Lighting Rig + crisp hardware shadows
     const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x455838, 1.0);
@@ -644,16 +705,56 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     scene.add(sunLight);
     scene.add(sunLight.target);
 
+    scene.background = new THREE.Color(0x9ac6eb);
+    scene.fog = new THREE.FogExp2(0xc2ddf2, 0.0017);
+
+    const applyDayNightLighting = (hours: number, w: WeatherPreset): number => {
+      const h = ((hours % 24) + 24) % 24;
+      const sunAngle = ((h - 6) / 12) * Math.PI;
+      const sunElevation = Math.sin(sunAngle); // -1 midnight .. 0 sunrise/sunset .. +1 noon
+      const dayWeight = THREE.MathUtils.clamp((sunElevation + 0.14) / 0.52, 0, 1);
+      const nightFactor = 1 - dayWeight;
+      const sunsetWarmth = Math.exp(-Math.pow((sunElevation - 0.08) / 0.22, 2));
+
+      skyDome.updateSky(h, w);
+
+      const baseCfg = WEATHER_SKY[w === 'night' ? 'sunny' : w];
+      const nightCfg = WEATHER_SKY.night;
+
+      _dayBgColor.setHex(baseCfg.bg).lerp(new THREE.Color(nightCfg.bg), nightFactor);
+      _dayFogColor.setHex(baseCfg.fog).lerp(new THREE.Color(nightCfg.fog), nightFactor);
+      if (sunsetWarmth > 0.15 && w !== 'rain') {
+        const golden = new THREE.Color(0xe69158);
+        _dayBgColor.lerp(golden, sunsetWarmth * 0.35);
+        _dayFogColor.lerp(golden, sunsetWarmth * 0.35);
+      }
+
+      if (scene.background instanceof THREE.Color) {
+        scene.background.copy(_dayBgColor);
+      }
+      if (scene.fog instanceof THREE.FogExp2) {
+        scene.fog.color.copy(_dayFogColor);
+        scene.fog.density = THREE.MathUtils.lerp(baseCfg.fogDensity, Math.max(baseCfg.fogDensity, nightCfg.fogDensity), nightFactor * 0.65);
+      }
+
+      _daySunColor.setHex(baseCfg.sunColor).lerp(new THREE.Color(nightCfg.sunColor), nightFactor);
+      if (sunsetWarmth > 0.12 && w !== 'rain') {
+        _daySunColor.lerp(new THREE.Color(0xff9c4a), sunsetWarmth * 0.72);
+      }
+      sunLight.color.copy(_daySunColor);
+      sunLight.intensity = THREE.MathUtils.lerp(baseCfg.sunInt, nightCfg.sunInt, nightFactor);
+
+      _dayHemiSky.setHex(baseCfg.hemiSky).lerp(new THREE.Color(nightCfg.hemiSky), nightFactor);
+      _dayHemiGround.setHex(baseCfg.hemiGround).lerp(new THREE.Color(nightCfg.hemiGround), nightFactor);
+      hemiLight.color.copy(_dayHemiSky);
+      hemiLight.groundColor.copy(_dayHemiGround);
+      hemiLight.intensity = THREE.MathUtils.lerp(baseCfg.hemiInt, nightCfg.hemiInt, nightFactor);
+
+      return nightFactor;
+    };
+
     const applyWeatherVisuals = (w: WeatherPreset) => {
-      const cfg = WEATHER_SKY[w];
-      scene.background = new THREE.Color(cfg.bg);
-      scene.fog = new THREE.FogExp2(cfg.fog, cfg.fogDensity);
-      sunLight.color.setHex(cfg.sunColor);
-      sunLight.intensity = cfg.sunInt;
-      hemiLight.color.setHex(cfg.hemiSky);
-      hemiLight.groundColor.setHex(cfg.hemiGround);
-      hemiLight.intensity = cfg.hemiInt;
-      skyDome.updateWeather(w);
+      applyDayNightLighting(simRef.current.timeOfDayHours, w);
     };
     weatherUpdaterRef.current = applyWeatherVisuals;
     applyWeatherVisuals(simRef.current.weather);
@@ -669,6 +770,28 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     );
     busRigRef.current = bus;
     scene.add(bus.root);
+
+    // Real-Time Working Rear-View & Side Wing Mirror Render Targets (horizontally flipped like real mirrors!)
+    const rearMirrorRT = new THREE.WebGLRenderTarget(isSoftwareGl ? 256 : 384, isSoftwareGl ? 112 : 160, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+    });
+    rearMirrorRT.texture.wrapS = THREE.RepeatWrapping;
+    rearMirrorRT.texture.repeat.x = -1;
+    rearMirrorRT.texture.offset.x = 1;
+
+    const rightMirrorRT = new THREE.WebGLRenderTarget(isSoftwareGl ? 144 : 192, isSoftwareGl ? 192 : 256, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+    });
+    rightMirrorRT.texture.wrapS = THREE.RepeatWrapping;
+    rightMirrorRT.texture.repeat.x = -1;
+    rightMirrorRT.texture.offset.x = 1;
+
+    const rearMirrorCam = new THREE.PerspectiveCamera(56, 384 / 160, 0.4, 240);
+    const rightMirrorCam = new THREE.PerspectiveCamera(46, 192 / 256, 0.4, 240);
+    bus.setMirrorTextures(rearMirrorRT.texture, rightMirrorRT.texture);
+    let mirrorFrameCounter = 0;
 
     const audio = new IndianBusAudioEngine();
     audioRef.current = audio;
@@ -914,6 +1037,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         controllerRef.current?.setIndicator('hazard');
       } else if (code === 'KeyV') {
         controllerRef.current?.toggleWipers();
+      } else if (code === 'KeyT') {
+        controllerRef.current?.cycleTimeOfDay();
       } else if (code === 'KeyJ') {
         controllerRef.current?.clearLandslide();
       } else if (code === 'KeyR') {
@@ -1055,6 +1180,17 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         }
       }
 
+      // Smooth continuous 24-hour Day-Night cycle progression (~4.7 mins per full 24h day)
+      s.timeOfDayHours = (s.timeOfDayHours + dt * 0.085) % 24;
+      const nightFactor = applyDayNightLighting(s.timeOfDayHours, s.weather);
+      if (nightFactor > 0.72 && !s.autoNightLightsDone) {
+        s.autoNightLightsDone = true;
+        if (s.headlights === 0) s.headlights = 2;
+        s.cabinLight = true;
+      } else if (nightFactor < 0.25 && s.autoNightLightsDone) {
+        s.autoNightLightsDone = false;
+      }
+
       // Showcase Idle Orbit Mode on Landing Hub
       if (curMode === 'showcase') {
         if (!s.isLookDragging) {
@@ -1062,8 +1198,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         }
         bus.setDoorOpenAmount(0.18 + Math.sin(elapsed * 0.6) * 0.12);
         bus.updateDriverAndConductor(dt, elapsed, Math.sin(elapsed * 0.45) * 0.1, 0, 1, 'seated', false);
-        bus.updateLights(1, false, false, 'off', true, blinkOn);
-        bus.updateWipers(elapsed, false);
+        bus.updateLights(nightFactor > 0.5 ? 2 : 1, false, false, 'off', true, blinkOn);
+        bus.updateWipers(elapsed, s.weather === 'rain', s.weather === 'rain', dt);
         audio.updateEngine(760, 0, false);
         audio.updateCrowdAmbience(0, elapsed);
 
@@ -1074,10 +1210,20 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           s.busZ + Math.cos(s.orbitAngle) * r
         );
         camera.lookAt(s.busX, s.busY + 1.8, s.busZ + 0.8);
-        skyDome.mesh.position.copy(camera.position);
+        skyDome.group.position.copy(camera.position);
         if (himachalWorld) {
           _busPosVec.set(s.busX, s.busY, s.busZ);
-          himachalWorld.updateWorld(dt, elapsed, _busPosVec, s.busHeading, 0, _busPosVec, false, s.weather === 'rain');
+          himachalWorld.updateWorld(
+            dt,
+            elapsed,
+            _busPosVec,
+            s.busHeading,
+            0,
+            _busPosVec,
+            false,
+            s.weather === 'rain',
+            nightFactor
+          );
         }
         return;
       }
@@ -1210,23 +1356,23 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         }
 
         if (s.shiftCutTimer > 0) {
-          activeDrive *= 0.15;
+          activeDrive *= 0.42;
         }
 
         const gearIdx = Math.abs(s.gear);
         const gearMaxSpd = GEAR_MAX_SPEED_MS[s.gear] ?? 0;
         const torqueBoost =
           gearIdx === 1
-            ? 6.9
+            ? 7.2
             : gearIdx === 2
-              ? 5.5
+              ? 5.8
               : gearIdx === 3
-                ? 4.4
+                ? 4.8
                 : gearIdx === 4
-                  ? 3.7
+                  ? 4.1
                   : gearIdx === 5
-                    ? 3.1
-                    : 2.6;
+                    ? 3.5
+                    : 3.0;
 
         let accel = 0;
         if (s.handbrake) {
@@ -1244,8 +1390,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
             const withinGear = dir > 0 ? s.speedMs < gearMaxSpd : -s.speedMs < gearMaxSpd;
             if (withinGear) {
               const lugFactor =
-                s.transmission === 'manual' && gearIdx >= 3 && Math.abs(s.speedMs) < gearMaxSpd * 0.22
-                  ? 0.52
+                s.transmission === 'manual' && gearIdx >= 4 && Math.abs(s.speedMs) < gearMaxSpd * 0.2
+                  ? 0.74
                   : 1;
               accel += activeDrive * torqueBoost * lugFactor;
             }
@@ -1268,6 +1414,27 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
 
           accel -= s.speedMs * 0.14 + Math.sign(s.speedMs) * 0.22;
         }
+
+        // Authentic Indian Bus Pneumatic Air-Brake Release Sound ("CHSSSSSSS") on brake release & full stop!
+        const isBrakingNow = activeBrake > 0.12;
+        if (isBrakingNow) {
+          s.brakePressDuration += dt;
+          s.lastBrakeSpeedMs = Math.max(s.lastBrakeSpeedMs, Math.abs(s.speedMs));
+          // Trigger crisp air exhaust when braking from speed down to a dead stop
+          if (s.lastBrakeSpeedMs > 1.8 && Math.abs(s.speedMs) < 0.25) {
+            audio.playAirBrakeRelease(Math.min(1.2, 0.65 + s.lastBrakeSpeedMs * 0.045));
+            s.lastBrakeSpeedMs = 0;
+            s.brakePressDuration = 0;
+          }
+        } else if (s.prevBrakeHeld) {
+          // Trigger compressed-air exhaust hiss ("chsssssss") right as brake pedal is released!
+          if (s.brakePressDuration >= 0.1 && s.lastBrakeSpeedMs > 0.6) {
+            audio.playAirBrakeRelease(Math.min(1.15, 0.55 + s.brakePressDuration * 0.35 + s.lastBrakeSpeedMs * 0.025));
+          }
+          s.brakePressDuration = 0;
+          s.lastBrakeSpeedMs = 0;
+        }
+        s.prevBrakeHeld = isBrakingNow;
 
         s.speedMs += accel * dt;
         s.speedMs = THREE.MathUtils.clamp(s.speedMs, -8.5, 31.5);
@@ -1294,13 +1461,24 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.busY = THREE.MathUtils.damp(s.busY, groundY, 14, dt);
         s.distanceDrivenM += Math.abs(distMove);
 
-        // Highway shoulder guardrails in Career & Endless modes
+        // Highway shoulder guardrails in Career & Endless modes (widens on LEFT side at Dhabas so player can enter Bus Parking Bay!)
         const activeSample = careerRoadSample || endlessRoadSample;
         const activeRoadW = himachalWorld?.roadWidth ?? endlessWorld?.roadWidth ?? 11.2;
         if ((curMode === 'career' || curMode === 'endless') && activeSample) {
-          const maxLat = activeRoadW * 0.5 - 1.15;
-          if (Math.abs(activeSample.lateralOffset) > maxLat) {
-            const clampedLat = Math.sign(activeSample.lateralOffset) * maxLat;
+          const activeDhabas: DhabaComplexData[] =
+            curMode === 'career' && himachalWorld
+              ? himachalWorld.dhabas
+              : curMode === 'endless' && endlessWorld
+                ? endlessWorld.getDhabas()
+                : [];
+          const nearDhabaYard = activeDhabas.some(
+            (dh) => Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 25
+          );
+          const maxRightLat = activeRoadW * 0.5 - 1.15;
+          const minLeftLat = nearDhabaYard ? -(activeRoadW * 0.5 + 8.5) : -maxRightLat;
+
+          if (activeSample.lateralOffset > maxRightLat || activeSample.lateralOffset < minLeftLat) {
+            const clampedLat = THREE.MathUtils.clamp(activeSample.lateralOffset, minLeftLat, maxRightLat);
             const correction = clampedLat - activeSample.lateralOffset;
             s.busX += activeSample.right.x * correction;
             s.busZ += activeSample.right.z * correction;
@@ -1358,11 +1536,11 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.rpm = THREE.MathUtils.damp(s.rpm, 740, 6, dt);
       }
 
-      // Animate 3D Bus Cockpit Controls, Driver Hands & Exterior
+      // Animate 3D Bus Cockpit Controls, Driver Hands, Rain Wipers & Exterior
       s.doorAnim = THREE.MathUtils.damp(s.doorAnim, s.doorOpen ? 1 : 0, 6.5, dt);
       bus.setSteeringAngle(s.steerAngle);
       bus.setGearStick(s.gear);
-      bus.updateWipers(elapsed, s.wipersOn);
+      bus.updateWipers(elapsed, s.wipersOn, s.weather === 'rain', dt);
       bus.updateLights(
         s.headlights,
         activeBrake > 0.1 || s.handbrake,
@@ -1389,7 +1567,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           s.speedMs,
           _doorWorld,
           hornMelody || hornAir,
-          s.weather === 'rain'
+          s.weather === 'rain',
+          nightFactor
         );
 
         // Solid physical collision resolution (bus NEVER clips through cars/buses/trucks!)
@@ -1507,7 +1686,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           s.busHeading,
           s.speedMs,
           hornMelody || hornAir,
-          s.weather === 'rain'
+          s.weather === 'rain',
+          nightFactor
         );
         // Solid vehicle collisions in Endless Mode too (ZERO tolls!)
         resolveBusTrafficCollisions(endlessWorld.traffic);
@@ -1709,19 +1889,32 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       bus.bodyGroup.rotation.set(s.busPitch, 0, s.busRoll);
       bus.root.updateMatrixWorld();
 
-      // Keep sun shadow frustum centered near bus
-      sunLight.position.set(s.busX + 65, s.busY + 110, s.busZ + 45);
+      // Keep directional sun/moon shadow frustum orbiting naturally with Day-Night cycle
+      const sunOrbitAng = (((s.timeOfDayHours - 6) / 12) * Math.PI);
+      const isNightNow = s.timeOfDayHours >= 19.2 || s.timeOfDayHours < 5.6;
+      const lightElev = isNightNow ? Math.max(48, Math.abs(Math.sin(sunOrbitAng)) * 105) : Math.max(24, Math.sin(sunOrbitAng) * 125);
+      const lightX = Math.cos(sunOrbitAng) * (isNightNow ? -95 : 95);
+      sunLight.position.set(s.busX + lightX, s.busY + lightElev, s.busZ + 48);
       sunLight.target.position.set(s.busX, s.busY, s.busZ);
 
-      // Update audio engine + authentic Hindi crowd ambience & chatter
+      // Update audio engine + authentic Hindi crowd ambience & Dhaba/Bus-stop chatter
       audio.updateEngine(s.rpm, throttleIn, true);
       if (curMode === 'career' || curMode === 'endless') {
         let nearStopCrowd = false;
+        let nearDhabaCrowd = false;
         if (curMode === 'career' && himachalWorld) {
           for (const st of himachalWorld.stops) {
             const dStop = Math.hypot(s.busX - st.bayCenter.x, s.busZ - st.bayCenter.z);
             if (dStop < 38) {
               nearStopCrowd = true;
+              if (st.stop.landmarkType === 'dhaba') nearDhabaCrowd = true;
+              break;
+            }
+          }
+        } else if (curMode === 'endless' && endlessWorld) {
+          for (const dh of endlessWorld.getDhabas()) {
+            if (Math.hypot(s.busX - dh.position.x, s.busZ - dh.position.z) < 40) {
+              nearDhabaCrowd = true;
               break;
             }
           }
@@ -1729,11 +1922,13 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         let crowdIntensity = Math.min(0.55, (s.passengersOnBoard / 48) * 0.45);
         if (s.cameraMode === 'cabin') crowdIntensity += 0.22;
         if (s.doorOpen) crowdIntensity += 0.2;
-        if (nearStopCrowd) crowdIntensity = Math.min(1, crowdIntensity + 0.48);
+        if (nearStopCrowd || nearDhabaCrowd) crowdIntensity = Math.min(1, crowdIntensity + 0.5);
         audio.updateCrowdAmbience(crowdIntensity, elapsed);
 
         if (conductorMode === 'seated') {
-          if (nearStopCrowd || (s.activeStopIdx >= 0 && s.doorOpen)) {
+          if (nearDhabaCrowd) {
+            audio.triggerHindiCrowdVoice('dhaba', 10500);
+          } else if (nearStopCrowd || (s.activeStopIdx >= 0 && s.doorOpen)) {
             audio.triggerHindiCrowdVoice('bus_stop', 9500);
           } else if (s.passengersOnBoard >= 6) {
             audio.triggerHindiCrowdVoice('onboard', 22000);
@@ -1902,18 +2097,18 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 4, dt);
         camera.updateProjectionMatrix();
       } else if (s.cameraMode === 'cabin') {
-        // Upgraded Indian RHD Driver Eye Position: Steering Wheel, Floor Gear Stick, FM Stereo Radio & Gauges all clearly visible!
-        // Plus full 360° finger/mouse drag look-around inside the bus!
-        _cornerVec.set(-0.62, 2.26, 3.88).applyMatrix4(bus.root.matrixWorld);
+        // Balanced slightly zoomed-in RHD Driver Eye Position: clearer front road & wipers while keeping
+        // steering wheel, driver hands, live rear-view mirrors, gauges, radio & gear lever cleanly in frame!
+        _cornerVec.set(-0.66, 2.22, 4.06).applyMatrix4(bus.root.matrixWorld);
         camera.position.copy(_cornerVec);
 
         const totalYaw = s.busHeading + s.lookYaw;
-        const totalPitch = THREE.MathUtils.clamp(-0.15 + s.lookPitch + s.busPitch * 0.65, -0.78, 0.72);
+        const totalPitch = THREE.MathUtils.clamp(-0.09 + s.lookPitch + s.busPitch * 0.65, -0.78, 0.72);
         const cosP = Math.cos(totalPitch);
         _lookDir.set(Math.sin(totalYaw) * cosP, Math.sin(totalPitch), Math.cos(totalYaw) * cosP);
         _camTargetLook.copy(_cornerVec).addScaledVector(_lookDir, 22);
         camera.lookAt(_camTargetLook);
-        camera.fov = THREE.MathUtils.damp(camera.fov, 72, 6, dt);
+        camera.fov = THREE.MathUtils.damp(camera.fov, 62, 6, dt);
         camera.updateProjectionMatrix();
       } else if (s.cameraMode === 'bumper') {
         _cornerVec.set(0, 1.35, 5.72).applyMatrix4(bus.root.matrixWorld);
@@ -1937,8 +2132,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         camera.lookAt(s.busX, s.busY + 1.9, s.busZ);
       }
 
-      // Keep procedural gradient sky dome centered on camera
-      skyDome.mesh.position.copy(camera.position);
+      // Keep procedural Day-Night sky dome centered on active camera
+      skyDome.group.position.copy(camera.position);
     };
 
     const emitHudSnapshot = () => {
@@ -2016,6 +2211,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         damagePct: Math.round(s.damagePct),
         cameraMode: s.cameraMode,
         weather: s.weather,
+        timeOfDayHours: s.timeOfDayHours,
+        timeOfDayLabel: formatTimeOfDayLabel(s.timeOfDayHours),
         endlessBiome: s.endlessBiome,
         noticeText: s.noticeText,
         noticeSeverity: s.noticeSeverity,
@@ -2038,6 +2235,33 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       });
     };
 
+    const renderLiveMirrors = () => {
+      if (simRef.current.cameraMode !== 'cabin') return;
+      mirrorFrameCounter++;
+      if (isSoftwareGl && mirrorFrameCounter % 2 !== 0) return;
+
+      // 1. Interior Cabin Rear-View Mirror (rear-facing perspective from rear roof)
+      _mirrorPos.set(0, 2.75, -5.72).applyMatrix4(bus.root.matrixWorld);
+      _mirrorLook.set(0, 2.05, -36).applyMatrix4(bus.root.matrixWorld);
+      rearMirrorCam.position.copy(_mirrorPos);
+      rearMirrorCam.lookAt(_mirrorLook);
+      skyDome.group.position.copy(_mirrorPos);
+      renderer.setRenderTarget(rearMirrorRT);
+      renderer.render(scene, rearMirrorCam);
+
+      // 2. Driver-Side (Right) Wing Mirror (looks backward along the bus's right flank)
+      _mirrorPos.set(-1.62, 2.26, 4.92).applyMatrix4(bus.root.matrixWorld);
+      _mirrorLook.set(-2.35, 1.55, -24).applyMatrix4(bus.root.matrixWorld);
+      rightMirrorCam.position.copy(_mirrorPos);
+      rightMirrorCam.lookAt(_mirrorLook);
+      skyDome.group.position.copy(_mirrorPos);
+      renderer.setRenderTarget(rightMirrorRT);
+      renderer.render(scene, rightMirrorCam);
+
+      renderer.setRenderTarget(null);
+      skyDome.group.position.copy(camera.position);
+    };
+
     const tick = () => {
       if (disposed) return;
       const now = performance.now();
@@ -2046,6 +2270,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       elapsed += dt;
 
       stepSimulation(dt);
+      renderLiveMirrors();
       renderer.render(scene, camera);
 
       hudEmitTimer += dt;
@@ -2082,8 +2307,9 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       himachalWorld?.dispose();
       endlessWorld?.dispose();
       trainingArena?.dispose();
-      skyDome.mesh.geometry.dispose();
-      (skyDome.mesh.material as THREE.Material).dispose();
+      rearMirrorRT.dispose();
+      rightMirrorRT.dispose();
+      skyDome.dispose();
       envRT.dispose();
       renderer.dispose();
     };

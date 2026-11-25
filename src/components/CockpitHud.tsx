@@ -13,8 +13,10 @@ import {
   Lightbulb,
   LogOut,
   MapPin,
+  Moon,
   Octagon,
   RotateCcw,
+  Sun,
   Users,
   Volume2,
   VolumeX,
@@ -89,7 +91,7 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
               {mode === 'training' ? trackTitle : mode === 'endless' ? 'Endless Highway Drive' : routeTitle}
             </span>
             <span className="font-mono text-[11px] text-sky-300 tabular-nums whitespace-nowrap shrink-0">
-              {telemetry.altitudeM}m · {telemetry.slopePct >= 0 ? `+${telemetry.slopePct}%` : `${telemetry.slopePct}%`}
+              {telemetry.altitudeM}m · {telemetry.slopePct >= 0 ? `+${telemetry.slopePct}%` : `${telemetry.slopePct}%`} · {telemetry.timeOfDayLabel.split(' ')[0]}
             </span>
           </div>
 
@@ -227,16 +229,42 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
           {/* Wipers */}
           <button
             type="button"
-            onClick={() => controllerRef.current?.toggleWipers()}
+            tabIndex={-1}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              controllerRef.current?.toggleWipers();
+            }}
             title="Windshield Wipers (V)"
             aria-label="Toggle wipers"
-            className={`hud-compact w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer transition-colors ${
+            className={`hud-compact w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer touch-none transition-colors ${
               telemetry.wipersOn
                 ? 'bg-sky-600/90 border-sky-400/60 text-white'
                 : 'text-slate-300 hover:text-white'
             }`}
           >
             <CloudRain className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Day-Night Cycle Quick Advance */}
+          <button
+            type="button"
+            tabIndex={-1}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              controllerRef.current?.cycleTimeOfDay();
+            }}
+            title={`Time of Day: ${telemetry.timeOfDayLabel} (Press T to advance)`}
+            aria-label="Cycle time of day"
+            className="hud-compact h-8 px-2 rounded-lg text-[11px] font-semibold text-amber-200 hover:text-white inline-flex items-center gap-1 whitespace-nowrap cursor-pointer touch-none transition-colors"
+          >
+            {telemetry.timeOfDayHours >= 19 || telemetry.timeOfDayHours < 5.8 ? (
+              <Moon className="w-3.5 h-3.5 text-sky-300" />
+            ) : (
+              <Sun className="w-3.5 h-3.5 text-amber-300" />
+            )}
+            <span className="hidden lg:inline">{telemetry.timeOfDayLabel.split(' ')[1] || 'Day'}</span>
           </button>
 
           {/* Camera */}
@@ -593,15 +621,20 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
 
           {/* BOTTOM-RIGHT: Compact Upgraded Gear Shifter + Handbrake + Realistic Metallic Pedals */}
           <div className="pointer-events-auto flex items-end gap-2.5">
-            {/* Upgraded Interactive Gearbox Console */}
-            <div className="hud-compact rounded-xl p-2 flex flex-col items-center gap-1.5 min-w-[92px]">
+            {/* Upgraded Interactive Gearbox Console (Multi-touch safe while holding GAS/steering!) */}
+            <div className="hud-compact relative z-30 rounded-xl p-2 flex flex-col items-center gap-1.5 min-w-[92px]">
               {/* Mode Toggle: AUTO vs MANUAL */}
               <div className="flex items-center gap-1 w-full">
                 <button
                   type="button"
-                  onClick={() => controllerRef.current?.toggleTransmission()}
+                  tabIndex={-1}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    controllerRef.current?.toggleTransmission();
+                  }}
                   title="Switch Auto / Manual Transmission (M)"
-                  className={`flex-1 px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide transition-colors whitespace-nowrap cursor-pointer ${
+                  className={`flex-1 px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide transition-colors whitespace-nowrap cursor-pointer touch-none ${
                     telemetry.transmission === 'manual'
                       ? 'bg-amber-500/20 border border-amber-400/50 text-amber-300'
                       : 'bg-sky-500/20 border border-sky-400/50 text-sky-300'
@@ -620,8 +653,13 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                       <button
                         key={range}
                         type="button"
-                        onClick={() => controllerRef.current?.setAutoRange(range)}
-                        className={`flex-1 h-7 rounded-md font-mono text-xs font-bold transition-colors cursor-pointer ${
+                        tabIndex={-1}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          controllerRef.current?.setAutoRange(range);
+                        }}
+                        className={`flex-1 h-7 rounded-md font-mono text-xs font-bold transition-colors cursor-pointer touch-none ${
                           active
                             ? range === 'R'
                               ? 'bg-red-600/85 border border-red-300/60 text-white'
@@ -642,39 +680,54 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                   <div className="flex items-center gap-1.5 w-full justify-between">
                     <button
                       type="button"
-                      onClick={() => controllerRef.current?.shiftGear(-1)}
+                      tabIndex={-1}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        controllerRef.current?.shiftGear(-1);
+                      }}
                       title="Shift Down (Q)"
                       aria-label="Shift down"
-                      className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
+                      className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer touch-none ${
                         telemetry.shiftHint === 'down'
                           ? 'bg-amber-500/90 text-slate-950'
                           : 'bg-white/12 border border-white/20 hover:bg-white/20 text-slate-100'
                       }`}
                     >
-                      <ChevronDown className="w-4 h-4" />
+                      <ChevronDown className="w-4 h-4 pointer-events-none" />
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setGearGateOpen((o) => !o)}
+                      tabIndex={-1}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setGearGateOpen((o) => !o);
+                      }}
                       title="Click to open direct R-N-1..6 gear selector"
-                      className="min-w-[30px] h-7 px-1.5 rounded-md bg-slate-950/45 border border-white/25 flex items-center justify-center font-mono text-sm font-bold text-amber-300 cursor-pointer"
+                      className="min-w-[30px] h-7 px-1.5 rounded-md bg-slate-950/45 border border-white/25 flex items-center justify-center font-mono text-sm font-bold text-amber-300 cursor-pointer touch-none"
                     >
                       {gearLabel}
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => controllerRef.current?.shiftGear(1)}
+                      tabIndex={-1}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        controllerRef.current?.shiftGear(1);
+                      }}
                       title="Shift Up (E)"
                       aria-label="Shift up"
-                      className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
+                      className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer touch-none ${
                         telemetry.shiftHint === 'up'
                           ? 'bg-emerald-500/90 text-slate-950'
                           : 'bg-white/12 border border-white/20 hover:bg-white/20 text-slate-100'
                       }`}
                     >
-                      <ChevronUp className="w-4 h-4" />
+                      <ChevronUp className="w-4 h-4 pointer-events-none" />
                     </button>
                   </div>
 
@@ -688,8 +741,13 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                           <button
                             key={g}
                             type="button"
-                            onClick={() => controllerRef.current?.setGear(g)}
-                            className={`h-6 rounded font-mono text-[10px] font-bold transition-colors cursor-pointer ${
+                            tabIndex={-1}
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              controllerRef.current?.setGear(g);
+                            }}
+                            className={`h-6 rounded font-mono text-[10px] font-bold transition-colors cursor-pointer touch-none ${
                               active
                                 ? g === -1
                                   ? 'bg-red-600/85 text-white'
@@ -707,8 +765,13 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                       <span>Q− / E+</span>
                       <button
                         type="button"
-                        onClick={() => setGearGateOpen(true)}
-                        className={`cursor-pointer hover:text-white ${
+                        tabIndex={-1}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          setGearGateOpen(true);
+                        }}
+                        className={`cursor-pointer touch-none hover:text-white ${
                           telemetry.shiftHint === 'up'
                             ? 'text-emerald-400 font-bold'
                             : telemetry.shiftHint === 'down'
@@ -728,21 +791,27 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
               )}
             </div>
 
-            {/* Realistic Heavy-Bus Metallic Pedals + Air Parking Handbrake */}
-            <div className="flex flex-col items-end gap-1.5">
-              {/* Compact Air Handbrake Switch */}
+            {/* Realistic Heavy-Bus Metallic Pedals + Reliable Air Parking Handbrake */}
+            <div className="relative z-30 flex flex-col items-end gap-1.5">
+              {/* Compact Air Handbrake Switch (pointerDown + stopPropagation fixes landscape fullscreen stuck toggle!) */}
               <button
                 type="button"
-                onClick={() => controllerRef.current?.toggleHandbrake()}
+                tabIndex={-1}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  controllerRef.current?.toggleHandbrake();
+                }}
                 title="Air Parking Handbrake (Space)"
-                className={`hud-compact h-7 px-2.5 rounded-lg text-[10px] font-semibold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
+                aria-pressed={telemetry.handbrake}
+                className={`hud-compact relative z-30 h-7 px-2.5 rounded-lg text-[10px] font-semibold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer touch-none select-none transition-colors ${
                   telemetry.handbrake
                     ? 'bg-red-600/95 border-red-400 text-white'
                     : 'text-slate-200 hover:text-white'
                 }`}
               >
-                <Octagon className="w-3 h-3" />
-                <span>{telemetry.handbrake ? 'P-BRAKE ON' : 'P-Brake'}</span>
+                <Octagon className="w-3 h-3 pointer-events-none" />
+                <span className="pointer-events-none">{telemetry.handbrake ? 'P-BRAKE ON' : 'P-Brake'}</span>
               </button>
 
               {/* Brake & Accelerator Commercial Bus Pedals */}

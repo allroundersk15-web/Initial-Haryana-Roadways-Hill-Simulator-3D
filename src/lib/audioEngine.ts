@@ -6,7 +6,7 @@
  * - Warm bus-cabin & bus-stop crowd chatter murmur + natural spoken Hindi passenger/conductor voices
  * - Landslide rock-clearing excavator rumble SFX
  */
-export type CrowdChatterContext = 'bus_stop' | 'onboard' | 'landslide';
+export type CrowdChatterContext = 'bus_stop' | 'onboard' | 'landslide' | 'dhaba';
 
 const HINDI_CROWD_LINES: Record<CrowdChatterContext, string[]> = {
   bus_stop: [
@@ -30,6 +30,12 @@ const HINDI_CROWD_LINES: Record<CrowdChatterContext, string[]> = {
     'अरे आगे पहाड़ से पत्थर गिरे हैं, एक तरफ से धीरे निकालो!',
     'भाई साहब, आगे लैंडस्लाइड है, रास्ता साफ करवा कर चलो!',
     'ट्रैफिक धीरे-धीरे निकल रहा है, ध्यान से चलाना!',
+  ],
+  dhaba: [
+    'अरे छोटू, दो गरमा-गरम चाय और आलू परांठे जल्दी लाना!',
+    'भाई साहब, बस यहीं पार्किंग में लगा दो, खाना खाकर चलेंगे!',
+    'ताजा दाल तड़का और तंदूरी रोटी तैयार है, आ जाओ भाई साहब!',
+    'अरे बाइक साइड में पार्क करो, बस आ रही है ढाबे पर!',
   ],
 };
 
@@ -65,7 +71,9 @@ export class IndianBusAudioEngine {
     bus_stop: 0,
     onboard: 0,
     landslide: 0,
+    dhaba: 0,
   };
+  private lastAirBrakeAtMs = 0;
   private cachedHindiVoice: SpeechSynthesisVoice | null = null;
 
   // Classic Indian highway multi-tone musical pressure horn sequence (Hz)
@@ -423,6 +431,79 @@ export class IndianBusAudioEngine {
     noise.connect(filter);
     filter.connect(gain);
     gain.connect(this.masterGain);
+    noise.start(now);
+  }
+
+  /**
+   * Authentic Indian Heavy Bus Pneumatic Air-Brake Release Sound ("CHSSSSSSS!")
+   * Synthesizes a pressurized exhaust valve pop + crisp layered compressed-air jet hiss with realistic decay tail.
+   */
+  public playAirBrakeRelease(intensity = 1.0): void {
+    this.init();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const nowMs = Date.now();
+    if (nowMs - this.lastAirBrakeAtMs < 420) return;
+    this.lastAirBrakeAtMs = nowMs;
+
+    const clamped = Math.max(0.35, Math.min(1.25, intensity));
+    const durationSec = 0.62 + clamped * 0.42;
+    const now = this.ctx.currentTime;
+
+    // 1. Sharp metallic air-valve exhaust pop ("CH-")
+    const valveOsc = this.ctx.createOscillator();
+    const valveGain = this.ctx.createGain();
+    valveOsc.type = 'triangle';
+    valveOsc.frequency.setValueAtTime(520, now);
+    valveOsc.frequency.exponentialRampToValueAtTime(115, now + 0.048);
+    valveGain.gain.setValueAtTime(0.22 * clamped, now);
+    valveGain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
+    valveOsc.connect(valveGain);
+    valveGain.connect(this.masterGain);
+    valveOsc.start(now);
+    valveOsc.stop(now + 0.06);
+
+    // 2. Pressurized compressed-air hiss ("-SSSSSSS") with dual resonant exhaust formants
+    const sampleCount = Math.floor(this.ctx.sampleRate * durationSec);
+    const buffer = this.ctx.createBuffer(1, sampleCount, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      const p = i / sampleCount;
+      // Fast attack, brief pressure sustain, then natural pneumatic decay tail
+      const attack = Math.min(1, p * 36);
+      const decay = Math.exp(-p * 3.15);
+      const flutter = 0.88 + 0.12 * Math.sin(p * 42);
+      data[i] = (Math.random() * 2 - 1) * attack * decay * flutter;
+    }
+
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    // Core crisp air jet bandpass (sweeps downward slightly as chamber pressure drops)
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(3400, now);
+    bp.frequency.exponentialRampToValueAtTime(1450, now + durationSec);
+    bp.Q.value = 1.45;
+
+    // Bright upper sizzle highpass
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(2200, now);
+
+    const bpGain = this.ctx.createGain();
+    bpGain.gain.setValueAtTime(0.42 * clamped, now);
+    bpGain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
+
+    const hpGain = this.ctx.createGain();
+    hpGain.gain.setValueAtTime(0.24 * clamped, now);
+    hpGain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
+
+    noise.connect(bp);
+    noise.connect(hp);
+    bp.connect(bpGain);
+    hp.connect(hpGain);
+    bpGain.connect(this.masterGain);
+    hpGain.connect(this.masterGain);
     noise.start(now);
   }
 

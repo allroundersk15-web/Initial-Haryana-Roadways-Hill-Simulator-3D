@@ -154,6 +154,8 @@ export interface TelemetrySnapshot {
   damagePct: number;
   cameraMode: CameraMode;
   weather: WeatherPreset;
+  timeOfDayHours: number;
+  timeOfDayLabel: string;
   noticeText: string | null;
   noticeSeverity: 'info' | 'success' | 'warning' | 'danger';
   tripCompleted: boolean;
