@@ -1,12 +1,44 @@
-export type SimView = 'hub' | 'career-map' | 'training-select' | 'driving' | 'logbook';
+export type SimView = 'hub' | 'career-map' | 'training-select' | 'garage' | 'driving' | 'logbook';
 
-export type SimMode = 'showcase' | 'career' | 'training';
+export type SimMode = 'showcase' | 'career' | 'training' | 'endless';
 
 export type WeatherPreset = 'sunny' | 'mist' | 'rain' | 'night';
 
 export type TransmissionMode = 'auto' | 'manual';
 
 export type CameraMode = 'chase' | 'cabin' | 'bumper' | 'orbit';
+
+export type EndlessBiome = 'mountain' | 'foothills' | 'plains';
+
+export type BusLiveryId =
+  | 'haryana_hr'
+  | 'himachal_hrtc'
+  | 'punjab_punbus'
+  | 'up_upsrtc'
+  | 'rajasthan_rsrtc'
+  | 'uttarakhand_utc'
+  | 'delhi_dtc';
+
+export interface BusFleetSpec {
+  id: BusLiveryId;
+  stateName: string;
+  operatorName: string;
+  hindiName: string;
+  subtitle: string;
+  priceInr: number;
+  defaultPlate: string;
+  primaryColor: string;
+  secondaryColor: string;
+  stripeColor: string;
+  roofColor: string;
+  accentHex: number;
+  primaryHex: number;
+  roofHex: number;
+  seatHex: number;
+  slogan: string;
+  showCivicMedallions?: boolean;
+  description: string;
+}
 
 export type RouteId =
   | 'kalka-shimla'
@@ -112,6 +144,7 @@ export interface TelemetrySnapshot {
   atStopType: LandmarkType | null;
   boardingProgress: number; // 0..1
   tripEarningsInr: number;
+  tollsPaidInr: number;
   stopsCompleted: number;
   totalStops: number;
   nextStopName: string;
@@ -134,13 +167,14 @@ export interface TelemetrySnapshot {
   brakeActive: number; // 0..1
   shiftHint: 'up' | 'down' | null;
   autoRange: 'D' | 'N' | 'R';
+  endlessBiome: EndlessBiome | null;
   training: TrainingLiveState | null;
 }
 
 export interface BusControlInputs {
   throttle: number; // 0..1
   brake: number; // 0..1
-  steer: number; // -1 (left) .. 1 (right)
+  steer: number; // -1 (right) .. 1 (left)
   hornMelody: boolean;
   hornAir: boolean;
 }
@@ -154,6 +188,8 @@ export interface DriverProfile {
   totalPassengersCarried: number;
   htvLicenseEarned: boolean;
   preferredTransmission: TransmissionMode;
+  ownedBusIds?: BusLiveryId[];
+  selectedBusId?: BusLiveryId;
   createdAt?: unknown;
   updatedAt?: unknown;
 }

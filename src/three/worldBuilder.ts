@@ -1,5 +1,15 @@
 import * as THREE from 'three';
 import type { CareerRouteSpec, LandmarkType, RouteStopSpec } from '../types/simulator';
+import {
+  buildCurvedMountainTunnel,
+  buildIndianTrafficVehicle,
+  buildNhaiTollPlaza,
+  buildPahadiMountainHouse,
+  createHighDetailAsphaltTexture,
+  createSignboardTexture,
+  type TollPlazaData,
+  type TrafficKind,
+} from './sceneryAndTraffic';
 
 export interface PassengerActor {
   mesh: THREE.Group;
@@ -13,12 +23,19 @@ export interface PassengerActor {
 export interface TrafficVehicle {
   mesh: THREE.Group;
   t: number; // 0..1 spline parameter
-  speedT: number; // spline delta per second
+  speedT: number; // base spline delta per second
+  cruiseSpeedMs: number;
   direction: 1 | -1; // 1 = same direction, -1 = oncoming
-  laneOffset: number; // lateral offset from center
+  laneOffset: number; // lateral offset from center (+right, -left)
   baseLaneOffset: number;
-  kind: 'truck' | 'hrtc_bus' | 'taxi';
+  kind: TrafficKind;
+  halfWidth: number;
+  halfLength: number;
+  brakeLightMat: THREE.MeshStandardMaterial;
   honkYieldTimer: number;
+  yieldStopTimer: number;
+  currentSpeedMult: number;
+  heading: number;
 }
 
 export interface StopZoneData {
@@ -37,6 +54,7 @@ export interface HimachalWorldHandle {
   totalLengthMeters: number;
   roadWidth: number;
   stops: StopZoneData[];
+  tolls: TollPlazaData[];
   passengers: PassengerActor[];
   traffic: TrafficVehicle[];
   rainSystem: THREE.Points;
@@ -53,83 +71,13 @@ export interface HimachalWorldHandle {
     dt: number,
     elapsed: number,
     busPos: THREE.Vector3,
+    busHeading: number,
+    busSpeedMs: number,
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
     isRaining: boolean
   ) => void;
   dispose: () => void;
-}
-
-function createRoadAsphaltTexture(maxAniso: number): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
-  const ctx = canvas.getContext('2d')!;
-
-  // Weathered Himalayan asphalt base
-  ctx.fillStyle = '#2d343d';
-  ctx.fillRect(0, 0, 512, 512);
-
-  // Subtle gravel grain
-  for (let i = 0; i < 4200; i++) {
-    const x = Math.random() * 512;
-    const y = Math.random() * 512;
-    const v = 34 + Math.floor(Math.random() * 34);
-    ctx.fillStyle = `rgb(${v},${v + 3},${v + 7})`;
-    ctx.fillRect(x, y, 2, 2);
-  }
-
-  // White edge shoulder markings
-  ctx.fillStyle = '#e2e8f0';
-  ctx.fillRect(22, 0, 12, 512);
-  ctx.fillRect(478, 0, 12, 512);
-
-  // Indian highway dashed yellow center divider
-  ctx.fillStyle = '#facc15';
-  for (let y = 0; y < 512; y += 96) {
-    ctx.fillRect(250, y, 12, 54);
-  }
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(1, 220);
-  tex.anisotropy = maxAniso;
-  return tex;
-}
-
-function createSignboardTexture(
-  title: string,
-  subtitle: string,
-  bgColor: string,
-  textColor: string,
-  borderColor: string,
-  maxAniso: number
-): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1024;
-  canvas.height = 256;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = bgColor;
-  ctx.fillRect(0, 0, 1024, 256);
-  ctx.strokeStyle = borderColor;
-  ctx.lineWidth = 14;
-  ctx.strokeRect(10, 10, 1004, 236);
-
-  ctx.fillStyle = textColor;
-  ctx.font = '800 44px "Chakra Petch", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(title.slice(0, 38), 512, 118);
-
-  ctx.fillStyle = borderColor;
-  ctx.font = '700 32px "Plus Jakarta Sans", sans-serif';
-  ctx.fillText(subtitle.slice(0, 42), 512, 186);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = maxAniso;
-  return tex;
 }
 
 function buildHumanActor(seed: number): THREE.Group {
@@ -146,7 +94,6 @@ function buildHumanActor(seed: number): THREE.Group {
     roughness: 0.9,
   });
 
-  // Grounded bottom-center at y = 0
   const leftLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.07, 0.76, 8), pantMat);
   leftLeg.position.set(-0.11, 0.38, 0);
   g.add(leftLeg);
@@ -164,7 +111,6 @@ function buildHumanActor(seed: number): THREE.Group {
   head.position.set(0, 1.52, 0);
   g.add(head);
 
-  // Small shoulder duffel bag or Himachali cap on half the crowd
   if (seed % 2 === 0) {
     const cap = new THREE.Mesh(
       new THREE.CylinderGeometry(0.165, 0.165, 0.09, 10),
@@ -196,13 +142,11 @@ function buildLandmarkStructure(
   const woodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a26, roughness: 0.85 });
 
   if (type === 'bus_stand') {
-    // Concrete waiting platform
     const platform = new THREE.Mesh(new THREE.BoxGeometry(16, 0.36, 5.2), concreteMat);
     platform.position.set(0, 0.18, 0);
     platform.receiveShadow = true;
     group.add(platform);
 
-    // Steel columns
     for (const x of [-6.8, -2.2, 2.2, 6.8]) {
       const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 3.8, 10), darkMetalMat);
       post.position.set(x, 2.08, -1.5);
@@ -210,14 +154,12 @@ function buildLandmarkStructure(
       group.add(post);
     }
 
-    // Sloped Haryana / Himachal Interstate canopy roof
     const roof = new THREE.Mesh(new THREE.BoxGeometry(16.8, 0.22, 5.6), blueMetalMat);
     roof.position.set(0, 4.02, -0.4);
     roof.rotation.x = 0.12;
     roof.castShadow = true;
     group.add(roof);
 
-    // Back timetable wall
     const backWall = new THREE.Mesh(
       new THREE.BoxGeometry(14.5, 2.6, 0.28),
       new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.82 })
@@ -225,14 +167,12 @@ function buildLandmarkStructure(
     backWall.position.set(0, 1.5, -2.1);
     group.add(backWall);
 
-    // Waiting benches
     for (const bx of [-4.2, 0, 4.2]) {
       const bench = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.45, 0.65), woodMat);
       bench.position.set(bx, 0.58, -1.25);
       group.add(bench);
     }
 
-    // Illuminated Bus Stand Signboard
     const signTex = createSignboardTexture(
       stop.signageTitle,
       stop.hindiName,
@@ -248,7 +188,6 @@ function buildLandmarkStructure(
     sign.position.set(0, 4.7, 2.15);
     group.add(sign);
   } else if (type === 'mandir') {
-    // Authentic Pahadi Himachal Temple (Shikhara + Saffron Flags + Bell Archway)
     const plinth = new THREE.Mesh(
       new THREE.BoxGeometry(11, 1.0, 9.5),
       new THREE.MeshStandardMaterial({ color: 0xe7d3b7, roughness: 0.88 })
@@ -264,7 +203,6 @@ function buildLandmarkStructure(
     sanctum.castShadow = true;
     group.add(sanctum);
 
-    // Stepped Shikhara spire
     const shikharaMat = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.62 });
     for (let tier = 0; tier < 4; tier++) {
       const s = 5.6 - tier * 1.15;
@@ -273,13 +211,11 @@ function buildLandmarkStructure(
       group.add(tierMesh);
     }
 
-    // Golden Kalash finial
     const goldMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.2, metalness: 0.9 });
     const kalash = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 12), goldMat);
     kalash.position.set(0, 9.85, -0.5);
     group.add(kalash);
 
-    // Saffron Dhwaja flagpole + triangular banner
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 3.0, 8), goldMat);
     pole.position.set(0, 11.2, -0.5);
     group.add(pole);
@@ -291,7 +227,6 @@ function buildLandmarkStructure(
     flag.position.set(0.8, 12.1, -0.5);
     group.add(flag);
 
-    // Entrance Torana Arch & Hanging Brass Bell
     for (const sx of [-2.4, 2.4]) {
       const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.28, 3.6, 10), shikharaMat);
       pillar.position.set(sx, 2.6, 3.6);
@@ -319,7 +254,6 @@ function buildLandmarkStructure(
     sign.position.set(0, 5.4, 3.8);
     group.add(sign);
   } else if (type === 'dhaba') {
-    // Authentic Punjabi / Himachal Highway Dhaba with Charpais & Glowing Tandoor
     const base = new THREE.Mesh(new THREE.BoxGeometry(15.5, 0.28, 7.6), concreteMat);
     base.position.set(0, 0.14, 0);
     group.add(base);
@@ -332,7 +266,6 @@ function buildLandmarkStructure(
     mainHall.castShadow = true;
     group.add(mainHall);
 
-    // Corrugated tin sloped veranda roof
     const tinRoof = new THREE.Mesh(
       new THREE.BoxGeometry(13.8, 0.2, 6.8),
       new THREE.MeshStandardMaterial({ color: 0x991b1b, roughness: 0.6, metalness: 0.35 })
@@ -341,7 +274,6 @@ function buildLandmarkStructure(
     tinRoof.rotation.x = 0.14;
     group.add(tinRoof);
 
-    // Outdoor wooden Charpais (cots) & tables
     for (const cx of [-4.8, -1.6, 1.6, 4.8]) {
       const cot = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.52, 1.05), woodMat);
       cot.position.set(cx, 0.52, 2.35);
@@ -354,7 +286,6 @@ function buildLandmarkStructure(
       group.add(weave);
     }
 
-    // Glowing Clay Tandoor Pit
     const tandoor = new THREE.Mesh(
       new THREE.CylinderGeometry(0.65, 0.78, 1.05, 12),
       new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.92 })
@@ -390,7 +321,6 @@ function buildLandmarkStructure(
     sign.position.set(0, 4.75, 2.8);
     group.add(sign);
   } else {
-    // Colorful Pahadi Hill Market (Bazaar row of 4 terraced shops with awnings)
     const shopColors = [0xdbeafe, 0xfef3c7, 0xfce7f3, 0xdcfce7];
     const awningColors = [0xdc2626, 0x0284c7, 0xd97706, 0x16a34a];
     for (let i = 0; i < 4; i++) {
@@ -404,7 +334,6 @@ function buildLandmarkStructure(
       shop.castShadow = true;
       group.add(shop);
 
-      // Pitched Pahadi tin roof
       const roof = new THREE.Mesh(
         new THREE.ConeGeometry(3.2, 1.45, 4),
         new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.65, metalness: 0.3 })
@@ -413,7 +342,6 @@ function buildLandmarkStructure(
       roof.position.set(sx, shopH + 0.72, -0.6);
       group.add(roof);
 
-      // Striped front awning
       const awning = new THREE.Mesh(
         new THREE.BoxGeometry(3.6, 0.14, 1.65),
         new THREE.MeshStandardMaterial({ color: awningColors[i], roughness: 0.75 })
@@ -422,7 +350,6 @@ function buildLandmarkStructure(
       awning.rotation.x = 0.24;
       group.add(awning);
 
-      // Display fruit/apple crates
       const crate = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.55, 0.8), woodMat);
       crate.position.set(sx, 0.28, 2.3);
       group.add(crate);
@@ -447,141 +374,37 @@ function buildLandmarkStructure(
   return group;
 }
 
-function buildTrafficVehicle(kind: 'truck' | 'hrtc_bus' | 'taxi'): THREE.Group {
-  const g = new THREE.Group();
-  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.9 });
-  const glassMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.15, metalness: 0.5 });
-
-  const addWheel = (x: number, y: number, z: number, r = 0.42) => {
-    const w = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.28, 12), wheelMat);
-    w.rotation.z = Math.PI / 2;
-    w.position.set(x, y, z);
-    g.add(w);
-  };
-
-  if (kind === 'truck') {
-    // Colorful Indian Cargo Truck (Tata 1613 style)
-    const cab = new THREE.Mesh(
-      new THREE.BoxGeometry(2.35, 2.25, 2.1),
-      new THREE.MeshStandardMaterial({ color: 0xea580c, roughness: 0.45, metalness: 0.25 })
-    );
-    cab.position.set(0, 1.65, 2.5);
-    cab.castShadow = true;
-    g.add(cab);
-
-    const windshield = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.72, 0.1), glassMat);
-    windshield.position.set(0, 2.05, 3.54);
-    g.add(windshield);
-
-    const cargo = new THREE.Mesh(
-      new THREE.BoxGeometry(2.42, 2.35, 5.1),
-      new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.8 })
-    );
-    cargo.position.set(0, 1.85, -1.25);
-    cargo.castShadow = true;
-    g.add(cargo);
-
-    // Yellow rear "HORN OK PLEASE" plank
-    const rearPlank = new THREE.Mesh(
-      new THREE.BoxGeometry(2.3, 0.52, 0.1),
-      new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.6 })
-    );
-    rearPlank.position.set(0, 1.15, -3.82);
-    g.add(rearPlank);
-
-    addWheel(-1.12, 0.46, 2.3, 0.46);
-    addWheel(1.12, 0.46, 2.3, 0.46);
-    addWheel(-1.12, 0.46, -2.2, 0.46);
-    addWheel(1.12, 0.46, -2.2, 0.46);
-  } else if (kind === 'hrtc_bus') {
-    // Himachal Road Transport Corporation (HRTC) Green-White Hill Bus
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(2.42, 2.45, 9.6),
-      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.38, metalness: 0.2 })
-    );
-    body.position.set(0, 1.82, 0);
-    body.castShadow = true;
-    g.add(body);
-
-    const greenBand = new THREE.Mesh(
-      new THREE.BoxGeometry(2.46, 0.92, 9.62),
-      new THREE.MeshStandardMaterial({ color: 0x15803d, roughness: 0.42 })
-    );
-    greenBand.position.set(0, 1.25, 0);
-    g.add(greenBand);
-
-    const glassBand = new THREE.Mesh(new THREE.BoxGeometry(2.45, 0.82, 8.8), glassMat);
-    glassBand.position.set(0, 2.28, 0.1);
-    g.add(glassBand);
-
-    addWheel(-1.14, 0.48, 2.9, 0.48);
-    addWheel(1.14, 0.48, 2.9, 0.48);
-    addWheel(-1.14, 0.48, -2.8, 0.48);
-    addWheel(1.14, 0.48, -2.8, 0.48);
-  } else {
-    // White Himachal Hill SUV / Taxi (Innova / Bolero)
-    const lower = new THREE.Mesh(
-      new THREE.BoxGeometry(1.86, 0.85, 4.45),
-      new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.3, metalness: 0.35 })
-    );
-    lower.position.set(0, 0.84, 0);
-    lower.castShadow = true;
-    g.add(lower);
-
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(1.68, 0.72, 2.55),
-      new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.35 })
-    );
-    cabin.position.set(0, 1.56, -0.18);
-    g.add(cabin);
-
-    const cabinGlass = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.56, 2.25), glassMat);
-    cabinGlass.position.set(0, 1.56, -0.18);
-    g.add(cabinGlass);
-
-    // Yellow commercial taxi plate
-    const plate = new THREE.Mesh(
-      new THREE.BoxGeometry(0.55, 0.16, 0.08),
-      new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.5 })
-    );
-    plate.position.set(0, 0.62, 2.24);
-    g.add(plate);
-
-    addWheel(-0.9, 0.36, 1.35, 0.36);
-    addWheel(0.9, 0.36, 1.35, 0.36);
-    addWheel(-0.9, 0.36, -1.35, 0.36);
-    addWheel(0.9, 0.36, -1.35, 0.36);
-  }
-
-  // Headlights & Taillights
-  const hlMat = new THREE.MeshBasicMaterial({ color: 0xfef9c3 });
-  const tlMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-  const frontZ = kind === 'hrtc_bus' ? 4.82 : kind === 'truck' ? 3.56 : 2.24;
-  const backZ = kind === 'hrtc_bus' ? -4.82 : kind === 'truck' ? -3.82 : -2.24;
-  const halfW = kind === 'taxi' ? 0.68 : 0.92;
-  for (const sx of [-halfW, halfW]) {
-    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.16, 0.06), hlMat);
-    hl.position.set(sx, 0.88, frontZ);
-    g.add(hl);
-    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.18, 0.06), tlMat);
-    tl.position.set(sx, 0.92, backZ);
-    g.add(tl);
-  }
-
-  return g;
-}
-
 export function buildHimachalMountainWorld(
   route: CareerRouteSpec,
   renderer: THREE.WebGLRenderer
 ): HimachalWorldHandle {
   const maxAniso = renderer.capabilities.getMaxAnisotropy();
   const root = new THREE.Group();
-  const roadWidth = 10.6; // Authentic two-lane Himachal mountain highway
+  const roadWidth = 11.2; // Generous two-lane Indian NH highway for comfortable passing
 
-  // 1. Construct sweeping 3D Himalayan mountain spline (~2,200m scaled real drive with hairpins & climbs)
+  // Tunnel & Toll reserved spline intervals (kept gently curved & graded for clean geometry)
+  const tunnelRanges: Array<{ start: number; end: number; name: string }> = [
+    { start: 0.36, end: 0.405, name: `${route.origin.toUpperCase()} ROCK TUNNEL` },
+    { start: 0.68, end: 0.725, name: `${route.destination.toUpperCase()} PASS TUNNEL` },
+  ];
+  const tollSpecs = [
+    {
+      id: `${route.id}-toll-1`,
+      t: 0.24,
+      name: 'SANWARA NHAI TOLL',
+      feeInr: 450,
+    },
+    {
+      id: `${route.id}-toll-2`,
+      t: 0.79,
+      name: `${route.destination.split(' ')[0].toUpperCase()} GHAT TOLL`,
+      feeInr: route.splineSeed % 2 === 0 ? 500 : 400,
+    },
+  ];
+
+  // 1. Construct longer, sweeping 3D Himalayan mountain spline (~4,200m real-scale drive!)
   const controlPoints: THREE.Vector3[] = [];
-  const numCtrl = 46;
+  const numCtrl = 76;
   const seed = route.splineSeed;
   const climbScale = route.baseClimbRate;
 
@@ -594,32 +417,39 @@ export function buildHimachalMountainWorld(
     const frac = i / (numCtrl - 1);
     controlPoints.push(new THREE.Vector3(curX, curY, curZ));
 
-    // Keep first 2 and last 2 segments straight for smooth depot start/finish
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - frac) < 0.032);
+    const nearTunnel = tunnelRanges.some((tn) => frac >= tn.start - 0.025 && frac <= tn.end + 0.025);
+    const nearStop = route.stops.some((s) => Math.abs(s.progressT - frac) < 0.036);
+
     let turn = 0;
     if (i > 1 && i < numCtrl - 3) {
-      turn =
-        Math.sin(i * 0.58 + seed) * 0.42 * route.cliffTightness +
-        Math.cos(i * 0.27 + seed * 1.7) * 0.28;
+      const rawTurn =
+        Math.sin(i * 0.44 + seed) * 0.34 * route.cliffTightness +
+        Math.cos(i * 0.21 + seed * 1.7) * 0.22;
+      // Straighten smoothly near toll plazas and gently soften inside tunnels so bore looks authentic
+      turn = nearToll ? rawTurn * 0.12 : nearTunnel ? rawTurn * 0.35 : rawTurn;
     }
     heading += turn;
-    // Clamp heading so road never loops back on itself
-    heading = THREE.MathUtils.clamp(heading, -1.18, 1.18);
+    // Clamp heading tightly so mountain flanks NEVER fold back over adjacent road segments
+    heading = THREE.MathUtils.clamp(heading, -1.02, 1.02);
 
-    const stepLen = 52;
+    const stepLen = 56;
     curX += Math.sin(heading) * stepLen;
     curZ += Math.cos(heading) * stepLen;
 
-    // Gradual Himachal ascent with gentle flats around stops
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - frac) < 0.055);
-    const climb = nearStop ? 0.35 : (1.7 + Math.sin(i * 0.4 + seed) * 0.95) * climbScale;
-    curY += Math.max(0.15, climb);
+    const climb = nearStop || nearToll
+      ? 0.2
+      : nearTunnel
+        ? 0.45
+        : (1.55 + Math.sin(i * 0.36 + seed) * 0.85) * climbScale;
+    curY += Math.max(0.12, climb);
   }
 
   const curve = new THREE.CatmullRomCurve3(controlPoints, false, 'catmullrom', 0.5);
   const totalLengthMeters = curve.getLength();
 
-  // Pre-sample dense LUT for O(1)-ish fast ground & road projection
-  const lutCount = 440;
+  // Pre-sample dense LUT for fast ground projection & mountain road-clearance checking
+  const lutCount = 780;
   const lutPoints: THREE.Vector3[] = [];
   const lutTangents: THREE.Vector3[] = [];
   const lutRights: THREE.Vector3[] = [];
@@ -636,13 +466,11 @@ export function buildHimachalMountainWorld(
   }
 
   // 2. Build continuous 3D Ribbon Road Mesh + Mountain Cliff & Valley Skirt Terrain
-  const roadSegs = 420;
+  const roadSegs = 740;
   const roadPositions: number[] = [];
   const roadUvs: number[] = [];
   const roadIndices: number[] = [];
 
-  // Terrain skirt: uphill rock cliff on -right (inner mountain), downhill valley drop on +right (outer valley)
-  // Wait: in India left-hand drive, curb is +X (left of travel). Let's make LEFT (+left = -right) the cliff/stop terrace side, and RIGHT (+right) the scenic Himalayan valley vista!
   const cliffPositions: number[] = [];
   const cliffColors: number[] = [];
   const cliffIndices: number[] = [];
@@ -661,57 +489,63 @@ export function buildHimachalMountainWorld(
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
     leftVec.copy(right).negate();
 
-    // Road left/right edge vertices (offset +0.02 above terrain skirt to avoid Z-fighting)
     const rLeft = p.clone().addScaledVector(leftVec, halfW);
     const rRight = p.clone().addScaledVector(right, halfW);
     roadPositions.push(rLeft.x, rLeft.y + 0.04, rLeft.z, rRight.x, rRight.y + 0.04, rRight.z);
     roadUvs.push(0, t, 1, t);
 
-    // Uphill terraced mountain cliff on LEFT side (carves gently flat near stops so buildings sit flush!)
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.045);
-    const cliffShoulder = p.clone().addScaledVector(leftVec, halfW + (nearStop ? 15 : 3.2));
+    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.032);
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.025);
+    const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.008 && t <= tn.end + 0.008);
+
+    // Uphill terraced mountain cliff on LEFT side (+leftVec)
+    // Flatten generously near stops & tolls, keep modest clean setback inside tunnels so cliff never intrudes!
+    const shoulderW = nearStop || nearToll ? 16.5 : inTunnel ? 8.5 : 4.2;
+    const midOut = nearStop || nearToll ? 30 : inTunnel ? 24 : 21;
+    const midLift = nearStop || nearToll ? 14 : inTunnel ? 9 : 22 + Math.sin(t * 68) * 5;
+    const peakLift = inTunnel ? 28 : 58 + Math.cos(t * 36 + seed) * 16;
+
+    const c0 = p.clone().addScaledVector(leftVec, halfW + 0.1);
+    const cliffShoulder = p.clone().addScaledVector(leftVec, halfW + shoulderW);
     const cliffMid = p
       .clone()
-      .addScaledVector(leftVec, halfW + (nearStop ? 28 : 22))
-      .add(new THREE.Vector3(0, nearStop ? 14 : 24 + Math.sin(t * 48) * 6, 0));
+      .addScaledVector(leftVec, halfW + midOut)
+      .add(new THREE.Vector3(0, midLift, 0));
     const cliffPeak = p
       .clone()
-      .addScaledVector(leftVec, halfW + 78)
-      .add(new THREE.Vector3(0, 62 + Math.cos(t * 25 + seed) * 18, 0));
+      .addScaledVector(leftVec, halfW + 68)
+      .add(new THREE.Vector3(0, peakLift, 0));
 
-    // Shoulder base slightly below road
-    const c0 = p.clone().addScaledVector(leftVec, halfW - 0.2);
     cliffPositions.push(
-      c0.x, c0.y - 0.04, c0.z,
-      cliffShoulder.x, cliffShoulder.y - 0.08, cliffShoulder.z,
+      c0.x, c0.y - 0.12, c0.z,
+      cliffShoulder.x, cliffShoulder.y - 0.14, cliffShoulder.z,
       cliffMid.x, cliffMid.y, cliffMid.z,
       cliffPeak.x, cliffPeak.y, cliffPeak.z
     );
-    // Vertex colors: earthy shoulder -> mossy slate rock -> lush alpine pine -> misty stone
     cliffColors.push(
-      0.34, 0.35, 0.31,
-      0.32, 0.36, 0.26,
-      0.24, 0.33, 0.22,
-      0.34, 0.4, 0.38
+      0.32, 0.36, 0.27,
+      0.28, 0.4, 0.22,
+      0.22, 0.34, 0.2,
+      0.34, 0.41, 0.37
     );
 
-    // Downhill dramatic Himachal valley slope on RIGHT side
-    const v0 = p.clone().addScaledVector(right, halfW - 0.2);
-    const vShoulder = p.clone().addScaledVector(right, halfW + 2.8);
-    const vMid = p.clone().addScaledVector(right, halfW + 34).add(new THREE.Vector3(0, -24, 0));
-    const vFloor = p.clone().addScaledVector(right, halfW + 135).add(new THREE.Vector3(0, -68, 0));
+    // Downhill dramatic Himachal valley slope on RIGHT side (+right)
+    const v0 = p.clone().addScaledVector(right, halfW + 0.1);
+    const vShoulder = p.clone().addScaledVector(right, halfW + (nearToll ? 7.5 : 3.2));
+    const vMid = p.clone().addScaledVector(right, halfW + 32).add(new THREE.Vector3(0, -22, 0));
+    const vFloor = p.clone().addScaledVector(right, halfW + 120).add(new THREE.Vector3(0, -64, 0));
 
     valleyPositions.push(
-      v0.x, v0.y - 0.04, v0.z,
-      vShoulder.x, vShoulder.y - 0.14, vShoulder.z,
+      v0.x, v0.y - 0.12, v0.z,
+      vShoulder.x, vShoulder.y - 0.18, vShoulder.z,
       vMid.x, vMid.y, vMid.z,
       vFloor.x, vFloor.y, vFloor.z
     );
     valleyColors.push(
-      0.36, 0.36, 0.34,
-      0.28, 0.36, 0.24,
-      0.16, 0.28, 0.17,
-      0.14, 0.24, 0.2
+      0.35, 0.37, 0.31,
+      0.26, 0.39, 0.22,
+      0.16, 0.3, 0.17,
+      0.13, 0.24, 0.2
     );
 
     if (i < roadSegs) {
@@ -730,6 +564,31 @@ export function buildHimachalMountainWorld(
     }
   }
 
+  // CRITICAL ROAD-CLEARANCE PASS: Guarantee ZERO cliff/valley vertices ever intrude onto the highway!
+  const clearRadiusSq = (halfW + 3.4) * (halfW + 3.4);
+  const clampTerrainClearance = (positions: number[]) => {
+    const numVerts = positions.length / 3;
+    for (let v = 0; v < numVerts; v++) {
+      // Skip strip-0 edge vertices directly sewn to shoulder
+      if (v % 4 === 0) continue;
+      const vx = positions[v * 3];
+      const vy = positions[v * 3 + 1];
+      const vz = positions[v * 3 + 2];
+      // Check against sampled road centerline points
+      for (let k = 0; k <= lutCount; k += 2) {
+        const lp = lutPoints[k];
+        const dx = vx - lp.x;
+        const dz = vz - lp.z;
+        if (dx * dx + dz * dz < clearRadiusSq && vy > lp.y - 0.45) {
+          positions[v * 3 + 1] = lp.y - 0.65;
+          break;
+        }
+      }
+    }
+  };
+  clampTerrainClearance(cliffPositions);
+  clampTerrainClearance(valleyPositions);
+
   const roadGeo = new THREE.BufferGeometry();
   roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(roadPositions, 3));
   roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(roadUvs, 2));
@@ -737,8 +596,8 @@ export function buildHimachalMountainWorld(
   roadGeo.computeVertexNormals();
 
   const roadMat = new THREE.MeshStandardMaterial({
-    map: createRoadAsphaltTexture(maxAniso),
-    roughness: 0.86,
+    map: createHighDetailAsphaltTexture(maxAniso, 420),
+    roughness: 0.84,
     metalness: 0.04,
   });
   const roadMesh = new THREE.Mesh(roadGeo, roadMat);
@@ -770,22 +629,22 @@ export function buildHimachalMountainWorld(
   valleyMesh.receiveShadow = true;
   root.add(valleyMesh);
 
-  // 3. Distant Snow-Capped Himalayan Mountain Peaks Ring (Natural Outdoor Horizon)
-  const peakMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.92 });
-  const snowCapMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.72 });
+  // 3. Distant Snow-Capped Himalayan Peaks Horizon Ring (pushed well outside route footprint)
+  const peakMat = new THREE.MeshStandardMaterial({ color: 0x4b5c6e, roughness: 0.92 });
+  const snowCapMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.68 });
   const midCurvePt = curve.getPointAt(0.5);
-  for (let i = 0; i < 24; i++) {
-    const angle = (i / 24) * Math.PI * 2;
-    const dist = 780 + (i % 3) * 180;
-    const peakH = 220 + (i % 5) * 75;
-    const peakR = 175 + (i % 4) * 45;
+  for (let i = 0; i < 28; i++) {
+    const angle = (i / 28) * Math.PI * 2;
+    const dist = 1650 + (i % 3) * 260;
+    const peakH = 290 + (i % 5) * 90;
+    const peakR = 240 + (i % 4) * 55;
     const mGroup = new THREE.Group();
     const basePeak = new THREE.Mesh(new THREE.ConeGeometry(peakR, peakH, 6), peakMat);
-    basePeak.position.y = peakH * 0.5 - 80;
+    basePeak.position.y = peakH * 0.5 - 90;
     mGroup.add(basePeak);
 
-    const snowCap = new THREE.Mesh(new THREE.ConeGeometry(peakR * 0.44, peakH * 0.42, 6), snowCapMat);
-    snowCap.position.y = peakH * 0.8 - 80;
+    const snowCap = new THREE.Mesh(new THREE.ConeGeometry(peakR * 0.45, peakH * 0.44, 6), snowCapMat);
+    snowCap.position.y = peakH * 0.8 - 90;
     mGroup.add(snowCap);
 
     mGroup.position.set(
@@ -796,30 +655,87 @@ export function buildHimachalMountainWorld(
     root.add(mGroup);
   }
 
-  // 4. Valley-Side Stone Parapet Guard Blocks & Red-White Hairpin Posts (InstancedMesh)
-  const parapetCount = 260;
+  // 4. Valley-Side Stone Parapet Guard Blocks (InstancedMesh, skipped cleanly inside tunnels & tolls)
+  const parapetCount = 460;
   const parapetGeo = new THREE.BoxGeometry(0.55, 0.72, 2.2);
   const parapetMat = new THREE.MeshStandardMaterial({ color: 0xd6d3d1, roughness: 0.92 });
   const parapetInst = new THREE.InstancedMesh(parapetGeo, parapetMat, parapetCount);
   const dummy = new THREE.Object3D();
+  let pCountActual = 0;
   for (let i = 0; i < parapetCount; i++) {
     const t = i / (parapetCount - 1);
+    const skip =
+      tunnelRanges.some((tn) => t >= tn.start - 0.008 && t <= tn.end + 0.008) ||
+      tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.015);
+    if (skip) continue;
     const p = curve.getPointAt(t);
     const tan = curve.getTangentAt(t).normalize();
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
-    dummy.position.copy(p).addScaledVector(right, halfW + 0.55);
+    dummy.position.copy(p).addScaledVector(right, halfW + 0.58);
     dummy.position.y += 0.34;
     dummy.lookAt(dummy.position.clone().add(tan));
     dummy.scale.set(1, 1, 1);
     dummy.updateMatrix();
-    parapetInst.setMatrixAt(i, dummy.matrix);
+    parapetInst.setMatrixAt(pCountActual++, dummy.matrix);
   }
+  parapetInst.count = pCountActual;
   parapetInst.instanceMatrix.needsUpdate = true;
   parapetInst.computeBoundingSphere();
   root.add(parapetInst);
 
-  // 5. Instanced Himalayan Deodar Cedar / Pine Forests (Trunk + 2 Foliage Cones)
-  const treeCount = 340;
+  // 5. Lush Himalayan Alpine Grass Tufts along Shoulders & Slopes (InstancedMesh — fast & crisp!)
+  const grassCount = 1100;
+  const grassGeo = new THREE.ConeGeometry(0.42, 0.85, 5);
+  const grassMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92 });
+  const grassInst = new THREE.InstancedMesh(grassGeo, grassMat, grassCount);
+  const grassPalette = [
+    new THREE.Color(0x2f6b2f),
+    new THREE.Color(0x3f7d2f),
+    new THREE.Color(0x4d8b31),
+    new THREE.Color(0x27592a),
+    new THREE.Color(0x658e34),
+  ];
+  let placedGrass = 0;
+  for (let i = 0; i < grassCount; i++) {
+    const t = ((i * 0.754877666) % 0.985) + 0.008;
+    const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.012 && t <= tn.end + 0.012);
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.018);
+    if (inTunnel || nearToll) continue;
+
+    const p = curve.getPointAt(t);
+    const tan = curve.getTangentAt(t).normalize();
+    const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+    const valleySide = i % 2 === 0;
+    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.032);
+    if (!valleySide && nearStop) continue;
+
+    const offsetFromEdge = 1.15 + ((i * 17) % 100) * 0.14;
+    const distOut = valleySide ? halfW + offsetFromEdge : -(halfW + offsetFromEdge);
+    const yOff = valleySide
+      ? -(offsetFromEdge > 3.2 ? (offsetFromEdge - 3.2) * 0.62 : 0.12)
+      : offsetFromEdge > 4.2
+        ? (offsetFromEdge - 4.2) * 0.75
+        : -0.05;
+    const sx = 0.75 + ((i * 13) % 10) * 0.1;
+    const sy = 0.6 + ((i * 23) % 10) * 0.09;
+
+    dummy.position.copy(p).addScaledVector(right, distOut);
+    dummy.position.y += yOff + 0.35 * sy;
+    dummy.rotation.set(0, (i * 2.1) % (Math.PI * 2), 0);
+    dummy.scale.set(sx, sy, sx);
+    dummy.updateMatrix();
+    grassInst.setMatrixAt(placedGrass, dummy.matrix);
+    grassInst.setColorAt(placedGrass, grassPalette[i % grassPalette.length]);
+    placedGrass++;
+  }
+  grassInst.count = placedGrass;
+  grassInst.instanceMatrix.needsUpdate = true;
+  if (grassInst.instanceColor) grassInst.instanceColor.needsUpdate = true;
+  grassInst.computeBoundingSphere();
+  root.add(grassInst);
+
+  // 6. Instanced Himalayan Deodar Cedar / Pine Forests
+  const treeCount = 520;
   const trunkGeo = new THREE.CylinderGeometry(0.24, 0.42, 3.6, 6);
   const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3222, roughness: 0.94 });
   const foliageGeo = new THREE.ConeGeometry(2.6, 9.2, 7);
@@ -837,14 +753,18 @@ export function buildHimachalMountainWorld(
   let placedTrees = 0;
   for (let i = 0; i < treeCount; i++) {
     const t = ((i * 0.6180339887) % 0.98) + 0.01;
+    const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.015 && t <= tn.end + 0.015);
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.02);
+    if (inTunnel || nearToll) continue;
+
     const p = curve.getPointAt(t);
     const tan = curve.getTangentAt(t).normalize();
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
 
-    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.042);
+    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.036);
     const valleySide = i % 2 === 0 || nearStop;
-    const distOut = valleySide ? halfW + 8 + (i % 7) * 5.5 : -(halfW + 10 + (i % 6) * 5.2);
-    const yOffset = valleySide ? -(distOut - halfW) * 0.55 : (Math.abs(distOut) - halfW) * 0.68;
+    const distOut = valleySide ? halfW + 9 + (i % 7) * 5.2 : -(halfW + 11.5 + (i % 6) * 5.0);
+    const yOffset = valleySide ? -(distOut - halfW) * 0.56 : (Math.abs(distOut) - halfW) * 0.72;
     const s = 0.85 + ((i * 19) % 35) / 100;
 
     dummy.position.copy(p).addScaledVector(right, distOut);
@@ -860,6 +780,8 @@ export function buildHimachalMountainWorld(
     foliageInst.setColorAt(placedTrees, pinePalette[i % pinePalette.length]);
     placedTrees++;
   }
+  trunkInst.count = placedTrees;
+  foliageInst.count = placedTrees;
   trunkInst.instanceMatrix.needsUpdate = true;
   foliageInst.instanceMatrix.needsUpdate = true;
   if (foliageInst.instanceColor) foliageInst.instanceColor.needsUpdate = true;
@@ -868,40 +790,59 @@ export function buildHimachalMountainWorld(
   root.add(trunkInst);
   root.add(foliageInst);
 
-  // 6. Iconic Rock-Cut Mountain Tunnel (Barog / Aut style at t = 0.61)
-  const tunnelT = 0.61;
-  const tunnelPos = curve.getPointAt(tunnelT);
-  const tunnelTan = curve.getTangentAt(tunnelT).normalize();
-  const tunnelGroup = new THREE.Group();
-  tunnelGroup.position.copy(tunnelPos);
-  tunnelGroup.lookAt(tunnelPos.clone().add(tunnelTan));
+  // 7. Authentic Pahadi Mountain Houses perched on safe Himalayan terraces along the route
+  for (let h = 0; h < 18; h++) {
+    const t = 0.07 + (h / 18) * 0.87;
+    const nearStop = route.stops.some((s) => Math.abs(s.progressT - t) < 0.042);
+    const inTunnel = tunnelRanges.some((tn) => t >= tn.start - 0.02 && t <= tn.end + 0.02);
+    const nearToll = tollSpecs.some((tl) => Math.abs(tl.t - t) < 0.025);
+    if (nearStop || inTunnel || nearToll) continue;
 
-  const tunnelArchMat = new THREE.MeshStandardMaterial({
-    color: 0x334155,
-    roughness: 0.92,
-    side: THREE.DoubleSide,
-  });
-  const tunnelCylinder = new THREE.Mesh(
-    new THREE.CylinderGeometry(7.2, 7.2, 42, 16, 1, true, 0, Math.PI),
-    tunnelArchMat
-  );
-  tunnelCylinder.rotation.z = Math.PI / 2;
-  tunnelCylinder.rotation.y = Math.PI / 2;
-  tunnelCylinder.position.y = 0.2;
-  tunnelGroup.add(tunnelCylinder);
+    const p = curve.getPointAt(t);
+    const tan = curve.getTangentAt(t).normalize();
+    const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
+    const left = right.clone().negate();
 
-  // Warm orange tunnel overhead lamps
-  for (let lz = -16; lz <= 16; lz += 8) {
-    const lamp = new THREE.Mesh(
-      new THREE.BoxGeometry(1.1, 0.14, 0.35),
-      new THREE.MeshBasicMaterial({ color: 0xfdba74 })
-    );
-    lamp.position.set(0, 6.7, lz);
-    tunnelGroup.add(lamp);
+    const onCliffSide = h % 3 !== 0;
+    const house = buildPahadiMountainHouse(h * 13 + seed);
+    if (onCliffSide) {
+      const distOut = halfW + 12.5 + (h % 3) * 4.5;
+      house.position.copy(p).addScaledVector(left, distOut);
+      house.position.y += (distOut - halfW - 3.5) * 0.65;
+      house.lookAt(p.clone().addScaledVector(right, 8));
+    } else {
+      const distOut = halfW + 13.0 + (h % 2) * 5.0;
+      house.position.copy(p).addScaledVector(right, distOut);
+      house.position.y -= (distOut - halfW - 2.5) * 0.45;
+      house.lookAt(p.clone().addScaledVector(left, 8));
+    }
+    root.add(house);
   }
-  root.add(tunnelGroup);
 
-  // 7. Route Landmarks (Bus Stands, Dhabas, Markets, Pahadi Mandirs) + Waiting Crowds + Stop Bays
+  // 8. Proper Curved Spline-Extruded Hollow Mountain Tunnels (NEVER clip into the road!)
+  for (const tn of tunnelRanges) {
+    const tunnelMesh = buildCurvedMountainTunnel(
+      curve,
+      tn.start,
+      tn.end,
+      roadWidth,
+      tn.name,
+      maxAniso
+    );
+    root.add(tunnelMesh);
+  }
+
+  // 9. NHAI FASTag Toll Plazas (Career Mode ONLY — deduct ₹400–₹500 per pass!)
+  const tolls: TollPlazaData[] = [];
+  for (const tl of tollSpecs) {
+    const pt = curve.getPointAt(tl.t);
+    const tan = curve.getTangentAt(tl.t).normalize();
+    const built = buildNhaiTollPlaza(tl.id, tl.name, tl.feeInr, tl.t, pt, tan, roadWidth, maxAniso);
+    root.add(built.group);
+    tolls.push(built.data);
+  }
+
+  // 10. Route Landmarks (Bus Stands, Dhabas, Markets, Pahadi Mandirs) + Waiting Crowds + Stop Bays
   const stops: StopZoneData[] = [];
   const passengers: PassengerActor[] = [];
 
@@ -911,14 +852,12 @@ export function buildHimachalMountainWorld(
     const right = new THREE.Vector3().crossVectors(tan, upVec).normalize();
     const left = right.clone().negate();
 
-    // Place landmark cleanly on the Indian LEFT curb side (+left) facing the highway
     const landmarkMesh = buildLandmarkStructure(stop.landmarkType, stop, maxAniso);
     const structOffset = stop.landmarkType === 'mandir' ? halfW + 9.2 : halfW + 6.4;
     landmarkMesh.position.copy(pt).addScaledVector(left, structOffset);
     landmarkMesh.lookAt(pt.clone().addScaledVector(right, 8));
     root.add(landmarkMesh);
 
-    // Painted Yellow Stop Bay on the Indian Left Lane
     const bayCenter = pt.clone().addScaledVector(left, halfW * 0.48);
     const bayMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(3.8, 14.5),
@@ -937,7 +876,6 @@ export function buildHimachalMountainWorld(
     bayMesh.rotateX(-Math.PI / 2);
     root.add(bayMesh);
 
-    // Crisp Glowing Checkpoint Halo Ring over Stop Bay
     const beaconRing = new THREE.Mesh(
       new THREE.TorusGeometry(2.4, 0.12, 10, 28),
       new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.78 })
@@ -957,7 +895,6 @@ export function buildHimachalMountainWorld(
       beaconRing,
     });
 
-    // Spawn 3D Public Crowd waiting near the curb at this stop
     const crowdTotal = Math.max(4, stop.waitingCount + 2);
     for (let pIdx = 0; pIdx < crowdTotal; pIdx++) {
       const actor = buildHumanActor(stopIdx * 31 + pIdx * 7);
@@ -984,33 +921,61 @@ export function buildHimachalMountainWorld(
     }
   });
 
-  // 8. Spawn Multi-Part AI Mountain Traffic (Trucks, HRTC Buses, Hill Taxis)
+  // 11. Spawn Realistic Indian Highway Traffic (Swift Cars, Bolero SUVs, Tata Trucks, HRTC Green Buses, Private Coaches)
   const traffic: TrafficVehicle[] = [];
-  const trafficKinds: Array<'truck' | 'hrtc_bus' | 'taxi'> = ['truck', 'taxi', 'hrtc_bus', 'taxi', 'truck'];
-  const trafficCount = 12;
+  const trafficPool: TrafficKind[] = [
+    'swift_car',
+    'hrtc_bus',
+    'suv_bolero',
+    'private_bus',
+    'tata_truck',
+    'swift_car',
+    'hrtc_bus',
+    'suv_bolero',
+    'private_bus',
+  ];
+  const trafficCount = 18;
   for (let i = 0; i < trafficCount; i++) {
-    const kind = trafficKinds[i % trafficKinds.length];
-    const direction: 1 | -1 = i % 2 === 0 ? -1 : 1; // Half oncoming in right lane, half same-dir in left lane
-    // Indian Left-Hand Driving: forward lane is LEFT (-rightOffset), oncoming lane is RIGHT (+rightOffset)
-    const baseLaneOffset = direction === 1 ? -2.55 : 2.55;
-    const t = 0.08 + (i / trafficCount) * 0.84;
-    const mesh = buildTrafficVehicle(kind);
-    root.add(mesh);
+    const kind = trafficPool[i % trafficPool.length];
+    const direction: 1 | -1 = i % 2 === 0 ? -1 : 1;
+    // Indian Left-Hand Driving: forward lane is LEFT (-2.65 along right), oncoming lane is RIGHT (+2.65 along right)
+    const baseLaneOffset = direction === 1 ? -2.65 : 2.65;
+    const t = 0.06 + (i / trafficCount) * 0.88;
+    const built = buildIndianTrafficVehicle(kind, i + seed);
+    root.add(built.group);
+
+    const cruiseSpeedMs =
+      kind === 'swift_car'
+        ? 13.5
+        : kind === 'suv_bolero'
+          ? 12.2
+          : kind === 'private_bus'
+            ? 10.0
+            : kind === 'hrtc_bus'
+              ? 9.4
+              : 8.0;
 
     traffic.push({
-      mesh,
+      mesh: built.group,
       t,
-      speedT: (kind === 'taxi' ? 11.5 : kind === 'hrtc_bus' ? 8.8 : 7.4) / totalLengthMeters,
+      speedT: cruiseSpeedMs / totalLengthMeters,
+      cruiseSpeedMs,
       direction,
       laneOffset: baseLaneOffset,
       baseLaneOffset,
       kind,
+      halfWidth: built.halfWidth,
+      halfLength: built.halfLength,
+      brakeLightMat: built.brakeLightMat,
       honkYieldTimer: 0,
+      yieldStopTimer: 0,
+      currentSpeedMult: 1,
+      heading: 0,
     });
   }
 
-  // 9. Procedural Monsoon Rain Particle System (toggled in Rain weather)
-  const rainCount = 900;
+  // 12. Procedural Monsoon Rain Particle System
+  const rainCount = 950;
   const rainPositions = new Float32Array(rainCount * 3);
   for (let i = 0; i < rainCount; i++) {
     rainPositions[i * 3] = (Math.random() - 0.5) * 60;
@@ -1037,8 +1002,8 @@ export function buildHimachalMountainWorld(
   function sampleRoadAt(pos: THREE.Vector3, hintT?: number) {
     let bestIdx = 0;
     let bestDistSq = Infinity;
-    const startIdx = hintT !== undefined ? Math.max(0, Math.floor(hintT * lutCount) - 18) : 0;
-    const endIdx = hintT !== undefined ? Math.min(lutCount, Math.floor(hintT * lutCount) + 18) : lutCount;
+    const startIdx = hintT !== undefined ? Math.max(0, Math.floor(hintT * lutCount) - 24) : 0;
+    const endIdx = hintT !== undefined ? Math.min(lutCount, Math.floor(hintT * lutCount) + 24) : lutCount;
 
     for (let i = startIdx; i <= endIdx; i++) {
       const lp = lutPoints[i];
@@ -1070,6 +1035,8 @@ export function buildHimachalMountainWorld(
     dt: number,
     elapsed: number,
     busPos: THREE.Vector3,
+    _busHeading: number,
+    _busSpeedMs: number,
     doorWorldPos: THREE.Vector3,
     hornBlowing: boolean,
     isRaining: boolean
@@ -1081,6 +1048,14 @@ export function buildHimachalMountainWorld(
       } else {
         s.beaconRing.visible = false;
       }
+    }
+
+    // Animate NHAI toll plaza boom barriers
+    for (const tl of tolls) {
+      const dist = tl.position.distanceTo(busPos);
+      const shouldOpen = tl.paid || dist < 19;
+      tl.barrierOpenAnim = THREE.MathUtils.damp(tl.barrierOpenAnim, shouldOpen ? 1 : 0, 5.5, dt);
+      tl.barrierPivot.rotation.z = tl.barrierOpenAnim * (Math.PI * 0.44);
     }
 
     // Animate waiting & boarding 3D crowd passengers
@@ -1095,30 +1070,88 @@ export function buildHimachalMountainWorld(
           p.mesh.visible = false;
         }
       } else {
-        // Gentle idle weight-shift / wave at bus stand
         p.mesh.position.y = p.basePos.y + Math.abs(Math.sin(elapsed * 2.1 + p.phaseOffset)) * 0.04;
       }
     }
 
-    // Update AI Mountain Traffic along spline lanes
-    for (const v of traffic) {
-      let speedMult = 1.0;
-      const distToBus = v.mesh.position.distanceTo(busPos);
-      if (distToBus < 19) {
-        speedMult = distToBus < 11 ? 0.18 : 0.55;
-        if (hornBlowing) {
-          v.honkYieldTimer = 2.4;
+    // Intelligent Indian Traffic AI:
+    // - Passes normally at full speed when there is enough lateral room (NO horn required!)
+    // - When space is tight, smoothly steers toward its outer shoulder AND stops politely for a moment to let the bus pass
+    // - Optional player horn simply encourages nearby vehicles to hug their shoulder slightly earlier
+    const busHalfW = 1.28;
+    for (let i = 0; i < traffic.length; i++) {
+      const v = traffic[i];
+      curve.getPointAt(v.t, _tmpP);
+      curve.getTangentAt(v.t, _tmpTan).normalize();
+      _tmpRight.crossVectors(_tmpTan, upVec).normalize();
+
+      // Compute relative position of bus in this vehicle's road frame
+      const relX = busPos.x - v.mesh.position.x;
+      const relZ = busPos.z - v.mesh.position.z;
+      const forwardSign = v.direction;
+      const longAhead = (relX * _tmpTan.x + relZ * _tmpTan.z) * forwardSign;
+      const latDelta = Math.abs(relX * _tmpRight.x + relZ * _tmpRight.z);
+      const latClearance = latDelta - (busHalfW + v.halfWidth);
+
+      let targetSpeedMult = 1.0;
+      let targetLaneOffset = v.baseLaneOffset;
+      let braking = false;
+
+      // Check if bus is ahead or alongside within 34m
+      const inEncounterZone = longAhead > -v.halfLength - 5.2 && longAhead < 34;
+      if (inEncounterZone) {
+        if (latClearance > 0.65) {
+          // Plenty of room! Pass smoothly without stopping or needing any horn
+          targetSpeedMult = 1.0;
+          targetLaneOffset = v.baseLaneOffset;
+        } else if (longAhead > 0) {
+          // Tight squeeze ahead — pull politely toward outer shoulder & stop to yield right-of-way!
+          const shoulderDir = v.direction === -1 ? 1 : -1;
+          const maxShoulder = halfW - v.halfWidth - 0.35;
+          targetLaneOffset = shoulderDir * Math.min(maxShoulder, Math.abs(v.baseLaneOffset) + 1.35);
+
+          if (longAhead < 24) {
+            targetSpeedMult = 0.0;
+            braking = true;
+            v.yieldStopTimer = 1.1;
+          } else {
+            targetSpeedMult = 0.32;
+            braking = true;
+          }
         }
+      } else if (v.yieldStopTimer > 0) {
+        v.yieldStopTimer = Math.max(0, v.yieldStopTimer - dt);
+        targetSpeedMult = 0.25;
+      }
+
+      // Optional player horn courtesy nudge (never required, never slows player bus)
+      if (hornBlowing && Math.hypot(relX, relZ) < 32) {
+        v.honkYieldTimer = 2.0;
       }
       if (v.honkYieldTimer > 0) {
         v.honkYieldTimer = Math.max(0, v.honkYieldTimer - dt);
-        const yieldTarget = v.baseLaneOffset + (v.direction === -1 ? 1.15 : -0.85);
-        v.laneOffset = THREE.MathUtils.damp(v.laneOffset, yieldTarget, 4, dt);
-      } else {
-        v.laneOffset = THREE.MathUtils.damp(v.laneOffset, v.baseLaneOffset, 2.5, dt);
+        const shoulderDir = v.direction === -1 ? 1 : -1;
+        const maxShoulder = halfW - v.halfWidth - 0.32;
+        targetLaneOffset = shoulderDir * Math.min(maxShoulder, Math.abs(v.baseLaneOffset) + 1.4);
       }
 
-      v.t += v.direction * v.speedT * speedMult * dt;
+      // Keep safe following distance behind other same-direction AI vehicles
+      for (let j = 0; j < traffic.length; j++) {
+        if (i === j || traffic[j].direction !== v.direction) continue;
+        const other = traffic[j];
+        const dtSpline = (other.t - v.t) * v.direction;
+        if (dtSpline > 0 && dtSpline * totalLengthMeters < v.halfLength + other.halfLength + 10) {
+          targetSpeedMult = Math.min(targetSpeedMult, 0.15);
+          braking = true;
+          break;
+        }
+      }
+
+      v.currentSpeedMult = THREE.MathUtils.damp(v.currentSpeedMult, targetSpeedMult, braking ? 7.5 : 3.6, dt);
+      v.laneOffset = THREE.MathUtils.damp(v.laneOffset, targetLaneOffset, 3.8, dt);
+      v.brakeLightMat.emissiveIntensity = braking || v.currentSpeedMult < 0.25 ? 2.4 : 0.35;
+
+      v.t += v.direction * v.speedT * v.currentSpeedMult * dt;
       if (v.t > 0.96) v.t = 0.04;
       if (v.t < 0.04) v.t = 0.96;
 
@@ -1128,8 +1161,14 @@ export function buildHimachalMountainWorld(
 
       v.mesh.position.copy(_tmpP).addScaledVector(_tmpRight, v.laneOffset);
       v.mesh.position.y += 0.05;
-      const lookDir = _tmpTan.clone().multiplyScalar(v.direction);
-      v.mesh.lookAt(v.mesh.position.clone().add(lookDir));
+      const lookDirX = _tmpTan.x * v.direction;
+      const lookDirZ = _tmpTan.z * v.direction;
+      v.heading = Math.atan2(lookDirX, lookDirZ);
+      v.mesh.lookAt(
+        v.mesh.position.x + lookDirX,
+        v.mesh.position.y + _tmpTan.y * v.direction,
+        v.mesh.position.z + lookDirZ
+      );
     }
 
     // Monsoon rain particles follow bus
@@ -1165,6 +1204,7 @@ export function buildHimachalMountainWorld(
     totalLengthMeters,
     roadWidth,
     stops,
+    tolls,
     passengers,
     traffic,
     rainSystem,

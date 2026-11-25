@@ -52,6 +52,34 @@ service cloud.firestore {
       return weather is string && weather in ['sunny', 'mist', 'rain', 'night'];
     }
 
+    function isValidBusId(busId) {
+      return busId is string && busId in [
+        'haryana_hr',
+        'himachal_hrtc',
+        'punjab_punbus',
+        'up_upsrtc',
+        'rajasthan_rsrtc',
+        'uttarakhand_utc',
+        'delhi_dtc'
+      ];
+    }
+
+    function isValidOwnedBusIds(arr) {
+      return arr is list
+        && arr.size() >= 1
+        && arr.size() <= 7
+        && arr[0] is string
+        && arr.hasOnly([
+          'haryana_hr',
+          'himachal_hrtc',
+          'punjab_punbus',
+          'up_upsrtc',
+          'rajasthan_rsrtc',
+          'uttarakhand_utc',
+          'delhi_dtc'
+        ]);
+    }
+
     // Entity Validation Blueprint: DriverProfile
     function isValidDriverProfile(data, driverId) {
       return data.keys().hasAll([
@@ -75,6 +103,8 @@ service cloud.firestore {
         'totalPassengersCarried',
         'htvLicenseEarned',
         'preferredTransmission',
+        'selectedBusId',
+        'ownedBusIds',
         'createdAt',
         'updatedAt'
       ])
@@ -98,6 +128,8 @@ service cloud.firestore {
       && data.htvLicenseEarned is bool
       && data.preferredTransmission is string
       && data.preferredTransmission in ['auto', 'manual']
+      && (!('selectedBusId' in data) || isValidBusId(data.selectedBusId))
+      && (!('ownedBusIds' in data) || isValidOwnedBusIds(data.ownedBusIds))
       && data.createdAt is timestamp
       && data.updatedAt is timestamp;
     }
@@ -227,6 +259,13 @@ service cloud.firestore {
             'totalKmDriven',
             'totalPassengersCarried',
             'htvLicenseEarned',
+            'updatedAt'
+          ])
+          // Action 3: Buy or equip state transport buses from fleet garage
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'ownedBusIds',
+            'selectedBusId',
+            'totalEarningsInr',
             'updatedAt'
           ])
         );

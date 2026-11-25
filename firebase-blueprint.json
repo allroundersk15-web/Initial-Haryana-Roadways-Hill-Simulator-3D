@@ -44,6 +44,23 @@
           "enum": ["auto", "manual"],
           "description": "Preferred gearbox mode."
         },
+        "selectedBusId": {
+          "type": "string",
+          "enum": [
+            "haryana_hr",
+            "himachal_hrtc",
+            "punjab_punbus",
+            "up_upsrtc",
+            "rajasthan_rsrtc",
+            "uttarakhand_utc",
+            "delhi_dtc"
+          ],
+          "description": "Currently equipped state transport bus livery ID."
+        },
+        "ownedBusIds": {
+          "type": "array",
+          "description": "Bounded list of unlocked state transport bus livery IDs (max 7)."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

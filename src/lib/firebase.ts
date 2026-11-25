@@ -23,7 +23,9 @@ import {
   where,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { VALID_BUS_IDS } from '../data/buses';
 import type {
+  BusLiveryId,
   DepotName,
   DriverProfile,
   LicenseTestRecord,
@@ -149,11 +151,13 @@ export async function ensureDriverProfile(user: User): Promise<DriverProfile> {
       uid: user.uid,
       displayName: sanitizeString(user.displayName || 'HR Roadways Driver', 'HR Roadways Driver', 1, 80),
       depotHome: 'Panchkula' as DepotName,
-      totalEarningsInr: 0,
+      totalEarningsInr: 2500,
       totalKmDriven: 0,
       totalPassengersCarried: 0,
       htvLicenseEarned: false,
       preferredTransmission: 'auto' as TransmissionMode,
+      selectedBusId: 'haryana_hr' as BusLiveryId,
+      ownedBusIds: ['haryana_hr'] as BusLiveryId[],
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -244,6 +248,34 @@ export async function updateDriverSettings(
       displayName: sanitizeString(settings.displayName, 'HR Roadways Driver', 1, 80),
       depotHome: safeDepot,
       preferredTransmission: settings.preferredTransmission === 'manual' ? 'manual' : 'auto',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateDriverBusFleet(
+  uid: string,
+  fleet: {
+    ownedBusIds: BusLiveryId[];
+    selectedBusId: BusLiveryId;
+    totalEarningsInr: number;
+  }
+): Promise<void> {
+  const path = `drivers/${uid}`;
+  const cleanOwned = Array.from(
+    new Set(fleet.ownedBusIds.filter((id) => VALID_BUS_IDS.includes(id)))
+  );
+  if (!cleanOwned.includes('haryana_hr')) cleanOwned.unshift('haryana_hr');
+  const safeSelected = VALID_BUS_IDS.includes(fleet.selectedBusId)
+    ? fleet.selectedBusId
+    : 'haryana_hr';
+  try {
+    await updateDoc(doc(db, 'drivers', uid), {
+      ownedBusIds: cleanOwned.slice(0, 7),
+      selectedBusId: safeSelected,
+      totalEarningsInr: Math.round(clampNum(fleet.totalEarningsInr, 0, 100000000)),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {

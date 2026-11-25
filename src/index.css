@@ -45,17 +45,33 @@
   }
 }
 
-/* Compact translucent non-blurred HUD surfaces over WebGL (never stalls software WebGL) */
+/* Sleek glassy translucent HUD surfaces over live 3D WebGL (zero backdrop-filter GPU stalls) */
 .hud-panel {
-  background-color: rgba(11, 17, 26, 0.86);
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 10px 26px rgba(2, 6, 23, 0.5);
+  background: linear-gradient(
+    145deg,
+    rgba(17, 26, 42, 0.72) 0%,
+    rgba(11, 18, 30, 0.64) 55%,
+    rgba(18, 30, 48, 0.7) 100%
+  );
+  border: 1px solid rgba(226, 232, 240, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(15, 23, 42, 0.45),
+    0 12px 28px rgba(2, 6, 23, 0.42);
 }
 
 .hud-compact {
-  background-color: rgba(11, 17, 26, 0.74);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  box-shadow: 0 6px 18px rgba(2, 6, 23, 0.42);
+  background: linear-gradient(
+    155deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(18, 29, 46, 0.42) 38%,
+    rgba(10, 17, 29, 0.36) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(15, 23, 42, 0.35),
+    0 6px 18px rgba(2, 6, 23, 0.28);
 }
 
 .hud-panel-solid {
@@ -64,35 +80,52 @@
 }
 
 .hud-keycap {
-  background-color: rgba(24, 36, 54, 0.85);
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  box-shadow: inset 0 -2px 0 rgba(2, 6, 23, 0.55);
+  background-color: rgba(24, 36, 54, 0.65);
+  border: 1px solid rgba(226, 232, 240, 0.24);
+  box-shadow: inset 0 -2px 0 rgba(2, 6, 23, 0.45);
 }
 
 .pedal-shell {
-  background: linear-gradient(180deg, rgba(38, 49, 66, 0.94) 0%, rgba(16, 23, 35, 0.96) 100%);
-  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(30, 44, 64, 0.44) 42%,
+    rgba(12, 20, 34, 0.46) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.3);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 0 -3px 0 rgba(2, 6, 23, 0.72),
-    0 6px 14px rgba(2, 6, 23, 0.55);
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -3px 0 rgba(2, 6, 23, 0.45),
+    0 8px 18px rgba(2, 6, 23, 0.34);
   transition: transform 90ms cubic-bezier(0.16, 1, 0.3, 1), border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .pedal-pressed-gas {
   transform: translateY(3px) scale(0.95);
-  border-color: rgba(52, 211, 153, 0.85);
+  border-color: rgba(52, 211, 153, 0.9);
+  background: linear-gradient(
+    165deg,
+    rgba(52, 211, 153, 0.32) 0%,
+    rgba(16, 185, 129, 0.26) 55%,
+    rgba(6, 78, 59, 0.42) 100%
+  );
   box-shadow:
     inset 0 2px 6px rgba(16, 185, 129, 0.35),
-    0 2px 8px rgba(16, 185, 129, 0.28);
+    0 2px 10px rgba(16, 185, 129, 0.3);
 }
 
 .pedal-pressed-brake {
   transform: translateY(3px) scale(0.95);
-  border-color: rgba(248, 113, 113, 0.9);
+  border-color: rgba(248, 113, 113, 0.92);
+  background: linear-gradient(
+    165deg,
+    rgba(248, 113, 113, 0.32) 0%,
+    rgba(239, 68, 68, 0.26) 55%,
+    rgba(127, 29, 29, 0.42) 100%
+  );
   box-shadow:
     inset 0 2px 6px rgba(239, 68, 68, 0.38),
-    0 2px 8px rgba(239, 68, 68, 0.3);
+    0 2px 10px rgba(239, 68, 68, 0.32);
 }
 
 .sim-scroll::-webkit-scrollbar {

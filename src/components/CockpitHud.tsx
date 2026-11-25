@@ -28,6 +28,7 @@ interface CockpitHudProps {
   telemetry: TelemetrySnapshot;
   routeTitle: string;
   trackTitle: string;
+  busBadgeCode?: string;
   controllerRef: React.RefObject<BusSimController | null>;
   onExitDriving: () => void;
   onNextTrainingTrack?: () => void;
@@ -40,6 +41,7 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
   telemetry,
   routeTitle,
   trackTitle,
+  busBadgeCode = 'HR',
   controllerRef,
   onExitDriving,
   onNextTrainingTrack,
@@ -68,23 +70,30 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
   const leftIndActive = telemetry.indicators === 'left' || telemetry.indicators === 'hazard';
   const rightIndActive = telemetry.indicators === 'right' || telemetry.indicators === 'hazard';
 
+  const biomeLabel =
+    telemetry.endlessBiome === 'plains'
+      ? 'North India Plains'
+      : telemetry.endlessBiome === 'foothills'
+        ? 'Shivalik Foothills'
+        : 'Himalayan Mountains';
+
   return (
     <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between select-none">
-      {/* TOP PERIMETER STRIP: Ultra-compact corner telemetry + slim top-center instrument cluster */}
+      {/* TOP PERIMETER STRIP: Ultra-compact glassy corner telemetry + slim top-center instrument cluster */}
       <div className="flex items-start justify-between gap-2 px-2.5 pt-2.5 md:px-3.5 md:pt-3">
-        {/* Top-Left Compact Route / Exam Telemetry */}
-        <div className="pointer-events-auto hud-compact rounded-xl px-3 py-1.5 max-w-[300px] sm:max-w-[340px]">
+        {/* Top-Left Compact Route / Endless / Exam Telemetry */}
+        <div className="pointer-events-auto hud-compact rounded-xl px-3 py-1.5 max-w-[310px] sm:max-w-[355px]">
           <div className="flex items-center justify-between gap-2">
             <span className="font-display text-xs font-bold text-white truncate">
-              {mode === 'training' ? trackTitle : routeTitle}
+              {mode === 'training' ? trackTitle : mode === 'endless' ? 'Endless Highway Drive' : routeTitle}
             </span>
-            <span className="font-mono text-[11px] text-sky-400 tabular-nums whitespace-nowrap shrink-0">
+            <span className="font-mono text-[11px] text-sky-300 tabular-nums whitespace-nowrap shrink-0">
               {telemetry.altitudeM}m · {telemetry.slopePct >= 0 ? `+${telemetry.slopePct}%` : `${telemetry.slopePct}%`}
             </span>
           </div>
 
           {mode === 'career' ? (
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-300 font-mono tabular-nums mt-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-200 font-mono tabular-nums mt-0.5">
               <span className="inline-flex items-center gap-1 text-amber-300 truncate max-w-[165px]">
                 <MapPin className="w-3 h-3 shrink-0" />
                 <span className="truncate">{telemetry.nextStopName}</span>
@@ -97,10 +106,24 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
               </span>
               <span aria-hidden="true">·</span>
               <span className="text-white font-semibold">₹{telemetry.tripEarningsInr}</span>
+              {telemetry.tollsPaidInr > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-amber-300">Tolls -₹{telemetry.tollsPaidInr}</span>
+                </>
+              )}
+            </div>
+          ) : mode === 'endless' ? (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-200 font-mono tabular-nums mt-0.5">
+              <span className="text-emerald-300 font-semibold">{biomeLabel}</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-white">{telemetry.distanceDrivenKm.toFixed(1)} km</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-sky-300">Toll-Free</span>
             </div>
           ) : telemetry.training ? (
             <div className="mt-0.5 space-y-0.5">
-              <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-slate-300">
+              <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-slate-200">
                 <span>
                   Gates {telemetry.training.checkpointsCleared}/{telemetry.training.totalCheckpoints}
                 </span>
@@ -384,18 +407,22 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
           <div className="pointer-events-auto hud-panel rounded-2xl p-5 max-w-md text-center border-emerald-500/40">
             <p className="text-xs font-semibold text-emerald-400 mb-1">Himachal Terminal Reached</p>
             <h2 className="font-display text-xl font-bold text-white mb-2">Trip Manifest Closed</h2>
-            <div className="grid grid-cols-3 gap-2 my-3 text-center font-mono tabular-nums">
-              <div className="p-2 rounded-lg bg-[#162234]">
-                <div className="text-base font-bold text-emerald-400">₹{telemetry.tripEarningsInr}</div>
-                <div className="text-[10px] text-slate-400">Fare</div>
+            <div className="grid grid-cols-4 gap-2 my-3 text-center font-mono tabular-nums">
+              <div className="p-2 rounded-lg bg-slate-900/50 border border-white/15">
+                <div className="text-sm font-bold text-emerald-400">₹{Math.max(0, telemetry.tripEarningsInr)}</div>
+                <div className="text-[10px] text-slate-300">Net Fare</div>
               </div>
-              <div className="p-2 rounded-lg bg-[#162234]">
-                <div className="text-base font-bold text-sky-400">{telemetry.passengersOnBoard}</div>
-                <div className="text-[10px] text-slate-400">Passengers</div>
+              <div className="p-2 rounded-lg bg-slate-900/50 border border-white/15">
+                <div className="text-sm font-bold text-amber-300">₹{telemetry.tollsPaidInr}</div>
+                <div className="text-[10px] text-slate-300">Tolls</div>
               </div>
-              <div className="p-2 rounded-lg bg-[#162234]">
-                <div className="text-base font-bold text-amber-400">{telemetry.safetyRating}/5</div>
-                <div className="text-[10px] text-slate-400">Safety</div>
+              <div className="p-2 rounded-lg bg-slate-900/50 border border-white/15">
+                <div className="text-sm font-bold text-sky-400">{telemetry.passengersOnBoard}</div>
+                <div className="text-[10px] text-slate-300">Pax</div>
+              </div>
+              <div className="p-2 rounded-lg bg-slate-900/50 border border-white/15">
+                <div className="text-sm font-bold text-amber-400">{telemetry.safetyRating}/5</div>
+                <div className="text-[10px] text-slate-300">Safety</div>
               </div>
             </div>
             <div className="flex items-center justify-center gap-2.5">
@@ -420,9 +447,9 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
 
       {/* BOTTOM CORNER-DOCKED CONTROLS: 100% Clear Center Viewport for the 3D Bus & Highway */}
       {controlsVisible ? (
-        <div className="flex items-end justify-between gap-2 px-3 pb-3 md:px-4 md:pb-3.5 pointer-events-none">
-          {/* BOTTOM-LEFT: Compact Indicators + Horns + Interactive Rotary Steering Wheel */}
-          <div className="pointer-events-auto flex flex-col items-start gap-1.5">
+        <div className="flex items-end justify-between gap-2 px-3 pb-2 md:px-4 md:pb-2.5 pointer-events-none">
+          {/* BOTTOM-LEFT: Compact Indicators + Horns + Larger Glassy Steering Wheel */}
+          <div className="pointer-events-auto flex flex-col items-start gap-1">
             {/* Compact Indicator & Indian Horn Micro-Cluster */}
             <div className="flex items-center gap-1">
               <button
@@ -502,6 +529,7 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
             <div className="flex items-end gap-2.5">
               <SteeringWheelControl
                 liveSteerNorm={telemetry.steerNorm}
+                badgeCode={busBadgeCode}
                 onSteerChange={(steer) => controllerRef.current?.setTouchInput({ steer })}
                 onCenterHornDown={() => controllerRef.current?.setTouchInput({ hornAir: true })}
                 onCenterHornUp={() => controllerRef.current?.setTouchInput({ hornAir: false })}
@@ -556,11 +584,11 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                         className={`flex-1 h-7 rounded-md font-mono text-xs font-bold transition-colors cursor-pointer ${
                           active
                             ? range === 'R'
-                              ? 'bg-red-600 text-white'
+                              ? 'bg-red-600/85 border border-red-300/60 text-white'
                               : range === 'N'
-                                ? 'bg-slate-600 text-white'
-                                : 'bg-[#0B5ED7] text-white'
-                            : 'bg-[#162234] text-slate-400 hover:text-white'
+                                ? 'bg-slate-500/75 border border-white/40 text-white'
+                                : 'bg-[#0B5ED7]/85 border border-sky-300/60 text-white'
+                            : 'bg-white/10 border border-white/15 text-slate-200 hover:bg-white/20 hover:text-white'
                         }`}
                       >
                         {range === 'D' && active ? `D${Math.max(1, telemetry.gear)}` : range}
@@ -579,8 +607,8 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                       aria-label="Shift down"
                       className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
                         telemetry.shiftHint === 'down'
-                          ? 'bg-amber-500 text-slate-950'
-                          : 'bg-[#182436] hover:bg-slate-700 text-slate-200'
+                          ? 'bg-amber-500/90 text-slate-950'
+                          : 'bg-white/12 border border-white/20 hover:bg-white/20 text-slate-100'
                       }`}
                     >
                       <ChevronDown className="w-4 h-4" />
@@ -590,7 +618,7 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                       type="button"
                       onClick={() => setGearGateOpen((o) => !o)}
                       title="Click to open direct R-N-1..6 gear selector"
-                      className="min-w-[30px] h-7 px-1.5 rounded-md bg-[#0F172A] border border-slate-700 flex items-center justify-center font-mono text-sm font-bold text-amber-400 cursor-pointer"
+                      className="min-w-[30px] h-7 px-1.5 rounded-md bg-slate-950/45 border border-white/25 flex items-center justify-center font-mono text-sm font-bold text-amber-300 cursor-pointer"
                     >
                       {gearLabel}
                     </button>
@@ -602,8 +630,8 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                       aria-label="Shift up"
                       className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
                         telemetry.shiftHint === 'up'
-                          ? 'bg-emerald-500 text-slate-950'
-                          : 'bg-[#182436] hover:bg-slate-700 text-slate-200'
+                          ? 'bg-emerald-500/90 text-slate-950'
+                          : 'bg-white/12 border border-white/20 hover:bg-white/20 text-slate-100'
                       }`}
                     >
                       <ChevronUp className="w-4 h-4" />
@@ -624,9 +652,9 @@ export const CockpitHud: React.FC<CockpitHudProps> = ({
                             className={`h-6 rounded font-mono text-[10px] font-bold transition-colors cursor-pointer ${
                               active
                                 ? g === -1
-                                  ? 'bg-red-600 text-white'
-                                  : 'bg-[#0B5ED7] text-white'
-                                : 'bg-[#162234] text-slate-300 hover:bg-slate-700'
+                                  ? 'bg-red-600/85 text-white'
+                                  : 'bg-[#0B5ED7]/85 text-white'
+                                : 'bg-white/12 border border-white/15 text-slate-200 hover:bg-white/22'
                             }`}
                           >
                             {label}
