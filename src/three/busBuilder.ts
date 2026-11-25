@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { BUS_FLEET } from '../data/buses';
 import type { BusFleetSpec } from '../types/simulator';
 
+export type ConductorMode = 'seated' | 'calling_stop' | 'guiding_reverse';
+
 export interface BusVisualRig {
   root: THREE.Group;
   bodyGroup: THREE.Group;
@@ -30,6 +32,15 @@ export interface BusVisualRig {
   setGearStick: (gear: number) => void;
   spinWheels: (distDelta: number) => void;
   updateWipers: (time: number, on: boolean) => void;
+  updateDriverAndConductor: (
+    dt: number,
+    elapsed: number,
+    steerAngle: number,
+    speedMs: number,
+    gear: number,
+    conductorMode: ConductorMode,
+    isShifting: boolean
+  ) => { conductorDoorNeed: number; conductorReadyOutside: boolean };
   updateLights: (
     headlights: 0 | 1 | 2,
     braking: boolean,
@@ -38,6 +49,48 @@ export interface BusVisualRig {
     cabinOn: boolean,
     blinkOn: boolean
   ) => void;
+}
+
+// Pre-allocated math helpers outside animation loop (zero GC churn)
+const _armStart = new THREE.Vector3();
+const _armMid = new THREE.Vector3();
+const _armEnd = new THREE.Vector3();
+const _armDir = new THREE.Vector3();
+const _upAxis = new THREE.Vector3(0, 1, 0);
+const _handLeftTarget = new THREE.Vector3();
+const _handRightTarget = new THREE.Vector3();
+const _gearKnobTarget = new THREE.Vector3();
+const _windowRestTarget = new THREE.Vector3();
+const _wheelTiltCos = Math.cos(0.58);
+const _wheelTiltSin = Math.sin(0.58);
+
+function computeWheelRimPoint(
+  rimAngleRad: number,
+  wheelSpinRad: number,
+  out: THREE.Vector3
+): THREE.Vector3 {
+  const theta = rimAngleRad + wheelSpinRad;
+  const r = 0.258;
+  const lx = Math.cos(theta) * r;
+  const ly = Math.sin(theta) * r;
+  const lz = -0.022;
+  const ry = ly * _wheelTiltCos - lz * _wheelTiltSin;
+  const rz = ly * _wheelTiltSin + lz * _wheelTiltCos;
+  return out.set(-0.68 + lx, 1.86 + ry, 4.52 + rz);
+}
+
+function orientCylinderSegment(
+  mesh: THREE.Object3D,
+  from: THREE.Vector3,
+  to: THREE.Vector3,
+  baseLength: number
+): void {
+  _armDir.subVectors(to, from);
+  const len = Math.max(0.02, _armDir.length());
+  mesh.position.copy(from).addScaledVector(_armDir, 0.5);
+  _armDir.divideScalar(len);
+  mesh.quaternion.setFromUnitVectors(_upAxis, _armDir);
+  mesh.scale.set(1, len / baseLength, 1);
 }
 
 /**
@@ -940,6 +993,19 @@ export function buildHaryanaRoadwaysBus(
   driverSeatBack.position.set(-0.68, 1.92, 3.56);
   bodyGroup.add(driverSeatBack);
 
+  // Conductor Front Jump-Seat beside driver (for conductor when travelling between bus stops)
+  const condSeatBase = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.18, 0.48), interiorSeatMat);
+  condSeatBase.position.set(0.42, 1.38, 4.02);
+  condSeatBase.rotation.y = -0.15;
+  bodyGroup.add(condSeatBase);
+  const condSeatBack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.64, 0.12), interiorSeatMat);
+  condSeatBack.position.set(0.46, 1.76, 3.79);
+  condSeatBack.rotation.y = -0.15;
+  bodyGroup.add(condSeatBack);
+  const condSeatPedestal = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.42, 0.36), chassisDarkMat);
+  condSeatPedestal.position.set(0.42, 1.14, 4.02);
+  bodyGroup.add(condSeatPedestal);
+
   // Sculpted Wrap-Around Bus Dashboard Console
   const dashBase = new THREE.Mesh(new THREE.BoxGeometry(2.36, 0.56, 0.76), dashMat);
   dashBase.position.set(0, 1.5, 4.98);
@@ -1097,6 +1163,232 @@ export function buildHaryanaRoadwaysBus(
   shiftCap.position.y = 0.79;
   gearStickPivot.add(shiftCap);
   bodyGroup.add(gearStickPivot);
+
+  // 8B. Visible 3D Driver Hands, Wrists & Forearms in Cockpit View (follows steering tilt + random 1-hand / 2-hand grip)
+  const driverSkinMat = new THREE.MeshStandardMaterial({
+    color: 0xc88b61,
+    roughness: 0.76,
+    metalness: 0.02,
+  });
+  const khakhiUniformMat = new THREE.MeshStandardMaterial({
+    color: 0xb69a6b,
+    roughness: 0.86,
+    metalness: 0.04,
+  });
+  const khakhiTrouserMat = new THREE.MeshStandardMaterial({
+    color: 0x6f5c3e,
+    roughness: 0.88,
+    metalness: 0.04,
+  });
+  const leatherMat = new THREE.MeshStandardMaterial({
+    color: 0x3b2314,
+    roughness: 0.65,
+    metalness: 0.08,
+  });
+
+  const buildDriverHandMesh = (isLeft: boolean): THREE.Group => {
+    const hand = new THREE.Group();
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.04, 0.086), driverSkinMat);
+    palm.castShadow = true;
+    hand.add(palm);
+
+    // 4 curled fingers wrapping cleanly over the steering rim
+    for (let f = 0; f < 4; f++) {
+      const fx = -0.028 + f * 0.019;
+      const finger = new THREE.Mesh(new THREE.CylinderGeometry(0.0095, 0.0085, 0.062, 8), driverSkinMat);
+      finger.position.set(fx, -0.008, 0.046);
+      finger.rotation.x = 1.05;
+      hand.add(finger);
+    }
+
+    // Opposable thumb gripping the inner rim
+    const thumb = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.0095, 0.052, 8), driverSkinMat);
+    thumb.position.set(isLeft ? -0.046 : 0.046, -0.002, 0.018);
+    thumb.rotation.z = isLeft ? 0.85 : -0.85;
+    thumb.rotation.x = 0.45;
+    hand.add(thumb);
+
+    // Wrist & stainless steel watch on driver's left wrist
+    const wrist = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.035, 0.055, 10), driverSkinMat);
+    wrist.rotation.x = Math.PI / 2;
+    wrist.position.set(0, 0, -0.058);
+    hand.add(wrist);
+
+    if (isLeft) {
+      const watchStrap = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.036, 0.022, 12), chromeMat);
+      watchStrap.rotation.x = Math.PI / 2;
+      watchStrap.position.set(0, 0, -0.062);
+      hand.add(watchStrap);
+      const watchDial = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.02, 0.012, 12),
+        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2, metalness: 0.7 })
+      );
+      watchDial.position.set(0, 0.033, -0.062);
+      hand.add(watchDial);
+    }
+    return hand;
+  };
+
+  const leftHandGroup = buildDriverHandMesh(true);
+  const rightHandGroup = buildDriverHandMesh(false);
+  bodyGroup.add(leftHandGroup);
+  bodyGroup.add(rightHandGroup);
+
+  const leftUpperSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.058, 0.34, 10), khakhiUniformMat);
+  const leftForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.046, 0.32, 10), driverSkinMat);
+  const rightUpperSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.058, 0.34, 10), khakhiUniformMat);
+  const rightForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.046, 0.32, 10), driverSkinMat);
+  bodyGroup.add(leftUpperSleeve, leftForearm, rightUpperSleeve, rightForearm);
+
+  const leftShoulderAnchor = new THREE.Vector3(-0.44, 1.84, 3.92);
+  const rightShoulderAnchor = new THREE.Vector3(-0.92, 1.84, 3.92);
+  const leftHandCurr = computeWheelRimPoint(0.16, 0, new THREE.Vector3());
+  const rightHandCurr = computeWheelRimPoint(Math.PI - 0.16, 0, new THREE.Vector3());
+
+  type DriveGripStyle = 'both' | 'right_only' | 'left_only';
+  let gripStyle: DriveGripStyle = 'both';
+  let gripStyleTimer = 7.5;
+  let shiftReachTimer = 0;
+
+  // 8C. Animated 3D Indian Roadways Conductor (sits beside driver, steps out at stops & guides reverse with whistle!)
+  const conductorGroup = new THREE.Group();
+  const condPelvis = new THREE.Group();
+  condPelvis.position.set(0, 0.92, 0);
+  conductorGroup.add(condPelvis);
+
+  // Articulated Legs (hip -> thigh + shin -> shoe)
+  const buildConductorLeg = (xOff: number) => {
+    const hip = new THREE.Group();
+    hip.position.set(xOff, 0, 0);
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.082, 0.072, 0.44, 10), khakhiTrouserMat);
+    thigh.position.y = -0.22;
+    thigh.castShadow = true;
+    hip.add(thigh);
+
+    const knee = new THREE.Group();
+    knee.position.set(0, -0.44, 0);
+    const shin = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.056, 0.42, 10), khakhiTrouserMat);
+    shin.position.y = -0.21;
+    shin.castShadow = true;
+    knee.add(shin);
+
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.24), chassisDarkMat);
+    shoe.position.set(0, -0.44, 0.05);
+    knee.add(shoe);
+
+    hip.add(knee);
+    condPelvis.add(hip);
+    return { hip, knee };
+  };
+  const condLeftLeg = buildConductorLeg(0.11);
+  const condRightLeg = buildConductorLeg(-0.11);
+
+  // Torso + Haryana Roadways Khakhi Shirt + Leather Ticket Cash Bag + Belt
+  const condTorso = new THREE.Group();
+  condTorso.position.set(0, 0.04, 0);
+  const torsoMesh = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.54, 0.23), khakhiUniformMat);
+  torsoMesh.position.y = 0.27;
+  torsoMesh.castShadow = true;
+  condTorso.add(torsoMesh);
+
+  const beltMesh = new THREE.Mesh(new THREE.BoxGeometry(0.415, 0.055, 0.245), leatherMat);
+  beltMesh.position.y = 0.03;
+  condTorso.add(beltMesh);
+
+  const beltBuckle = new THREE.Mesh(
+    new THREE.BoxGeometry(0.075, 0.05, 0.03),
+    new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.3, metalness: 0.8 })
+  );
+  beltBuckle.position.set(0, 0.03, 0.125);
+  condTorso.add(beltBuckle);
+
+  // Iconic Conductor Leather Ticket-Cash Satchel across shoulder
+  const satchelStrap = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.62, 0.25), leatherMat);
+  satchelStrap.position.set(0.02, 0.28, 0);
+  satchelStrap.rotation.z = -0.46;
+  condTorso.add(satchelStrap);
+  const ticketBag = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.24, 0.24), leatherMat);
+  ticketBag.position.set(0.24, 0.08, 0.04);
+  condTorso.add(ticketBag);
+
+  // Head + Hair + Classic Mustache + Collar
+  const condHead = new THREE.Group();
+  condHead.position.set(0, 0.58, 0);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.09, 10), driverSkinMat);
+  neck.position.y = 0.02;
+  condHead.add(neck);
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.125, 14, 14), driverSkinMat);
+  skull.position.y = 0.14;
+  skull.scale.set(0.92, 1.04, 0.96);
+  skull.castShadow = true;
+  condHead.add(skull);
+  const hairCap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.128, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.56),
+    chassisDarkMat
+  );
+  hairCap.position.y = 0.155;
+  hairCap.scale.set(0.94, 1.0, 0.98);
+  condHead.add(hairCap);
+  const mustache = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.018, 0.024), chassisDarkMat);
+  mustache.position.set(0, 0.105, 0.116);
+  condHead.add(mustache);
+  condTorso.add(condHead);
+
+  // Articulated Conductor Arms (Right arm waves passengers & guides reverse; Left arm holds metallic whistle!)
+  const buildConductorArm = (xOff: number, withWhistle: boolean) => {
+    const sh = new THREE.Group();
+    sh.position.set(xOff, 0.48, 0);
+    const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.052, 0.28, 10), khakhiUniformMat);
+    upper.position.y = -0.14;
+    sh.add(upper);
+
+    const elbow = new THREE.Group();
+    elbow.position.set(0, -0.28, 0);
+    const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.036, 0.26, 10), driverSkinMat);
+    fore.position.y = -0.13;
+    elbow.add(fore);
+    const palm = new THREE.Mesh(new THREE.SphereGeometry(0.046, 10, 10), driverSkinMat);
+    palm.position.y = -0.27;
+    elbow.add(palm);
+
+    if (withWhistle) {
+      // Shiny silver pea-whistle held in left hand for reverse guiding!
+      const whistle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.065, 10), chromeMat);
+      whistle.rotation.z = Math.PI / 2;
+      whistle.position.set(-0.02, -0.27, 0.04);
+      elbow.add(whistle);
+    } else {
+      // Yellow Roadways ticket roll pad in right hand when calling stops
+      const ticketPad = new THREE.Mesh(
+        new THREE.BoxGeometry(0.07, 0.1, 0.02),
+        new THREE.MeshStandardMaterial({ color: 0xfde047, roughness: 0.6 })
+      );
+      ticketPad.position.set(0, -0.29, 0.04);
+      elbow.add(ticketPad);
+    }
+    sh.add(elbow);
+    condTorso.add(sh);
+    return { sh, elbow };
+  };
+
+  const condLeftArm = buildConductorArm(0.24, true);
+  const condRightArm = buildConductorArm(-0.24, false);
+  condPelvis.add(condTorso);
+
+  // Start conductor seated on his front jump seat next to the driver
+  conductorGroup.position.set(0.42, 0.56, 4.02);
+  conductorGroup.rotation.y = -0.15;
+  root.add(conductorGroup);
+
+  // Conductor smooth locomotion state
+  const condState = {
+    x: 0.42,
+    y: 0.56,
+    z: 4.02,
+    rotY: -0.15,
+    seatedBlend: 1,
+    walkPhase: 0,
+  };
 
   // 9. Animated Pneumatic Bi-Fold Passenger Door on Indian LEFT Curb Side (+X)
   const doorLeaf1 = new THREE.Group();
@@ -1320,6 +1612,276 @@ export function buildHaryanaRoadwaysBus(
       const target = on ? Math.sin(time * 5.6) * 0.65 : -0.6;
       wiperLeft.rotation.z = target;
       wiperRight.rotation.z = target;
+    },
+    updateDriverAndConductor(
+      dt: number,
+      elapsed: number,
+      steerAngle: number,
+      speedMs: number,
+      gear: number,
+      conductorMode: ConductorMode,
+      isShifting: boolean
+    ) {
+      // 1. Randomly alternate between Two-Handed, Right-Handed (left on gear lever), and Left-Handed driving
+      if (isShifting) {
+        shiftReachTimer = 1.15;
+      } else if (shiftReachTimer > 0) {
+        shiftReachTimer = Math.max(0, shiftReachTimer - dt);
+      }
+
+      gripStyleTimer -= dt;
+      if (gripStyleTimer <= 0) {
+        const r = Math.random();
+        if (Math.abs(speedMs) < 0.8) {
+          gripStyle = r < 0.5 ? 'right_only' : 'both';
+        } else {
+          gripStyle = r < 0.46 ? 'both' : r < 0.8 ? 'right_only' : 'left_only';
+        }
+        gripStyleTimer = 6.5 + Math.random() * 6.5;
+      }
+
+      // Effective active grip: briefly reach for gear stick during shifts; favor both hands on very tight hairpins
+      let activeGrip: DriveGripStyle = gripStyle;
+      if (shiftReachTimer > 0) {
+        activeGrip = 'right_only';
+      } else if (Math.abs(steerAngle) > 0.44 && Math.abs(speedMs) > 7.0) {
+        activeGrip = 'both';
+      }
+
+      // Exact steering wheel spin (-steerAngle * 4.4) so hand movement mirrors wheel direction 1:1!
+      const wheelSpin = -steerAngle * 4.4;
+      const dualSpin = THREE.MathUtils.clamp(wheelSpin, -1.08, 1.08);
+      const singleSpin = THREE.MathUtils.clamp(wheelSpin, -1.48, 1.48);
+
+      // Compute floor gear stick knob position in bodyGroup space
+      _gearKnobTarget.set(
+        -0.22 - Math.sin(gearStickPivot.rotation.z) * 0.74,
+        1.78,
+        4.38 + Math.sin(gearStickPivot.rotation.x) * 0.74
+      );
+      // Relaxed driver-side window sill armrest position
+      _windowRestTarget.set(-1.05, 1.81, 4.24);
+
+      if (activeGrip === 'both') {
+        computeWheelRimPoint(0.16, dualSpin, _handLeftTarget);
+        computeWheelRimPoint(Math.PI - 0.16, dualSpin, _handRightTarget);
+      } else if (activeGrip === 'right_only') {
+        // Iconic Indian bus driver 1-hand steering (right palm near 1:30 o'clock, left hand on gear knob)
+        computeWheelRimPoint(Math.PI * 0.64, singleSpin, _handRightTarget);
+        _handLeftTarget.copy(_gearKnobTarget);
+      } else {
+        // Relaxed left-hand steering near 10:30 o'clock, right hand resting casually on window sill
+        computeWheelRimPoint(Math.PI * 0.36, singleSpin, _handLeftTarget);
+        _handRightTarget.copy(_windowRestTarget);
+      }
+
+      // Subtle engine/road vibration on hands when moving
+      const vib = Math.sin(elapsed * 24) * 0.003 * Math.min(1, Math.abs(speedMs) * 0.15 + 0.25);
+      _handLeftTarget.y += vib;
+      _handRightTarget.y -= vib;
+
+      const handDamp = 1 - Math.exp(-11.5 * dt);
+      leftHandCurr.lerp(_handLeftTarget, handDamp);
+      rightHandCurr.lerp(_handRightTarget, handDamp);
+
+      leftHandGroup.position.copy(leftHandCurr);
+      rightHandGroup.position.copy(rightHandCurr);
+
+      // Tilt hands to follow steering wheel pitch & roll direction
+      const leftOnWheel = activeGrip === 'both' || activeGrip === 'left_only';
+      const rightOnWheel = activeGrip === 'both' || activeGrip === 'right_only';
+      const handRoll = leftOnWheel && rightOnWheel ? dualSpin * 0.55 : singleSpin * 0.55;
+
+      leftHandGroup.rotation.set(
+        leftOnWheel ? 0.52 : 0.12,
+        leftOnWheel ? -0.18 : 0.28,
+        leftOnWheel ? handRoll * 0.85 + 0.18 : -0.12
+      );
+      rightHandGroup.rotation.set(
+        rightOnWheel ? 0.52 : 0.08,
+        rightOnWheel ? 0.18 : -0.22,
+        rightOnWheel ? handRoll * 0.85 - 0.18 : 0.15
+      );
+
+      // Connect bent-elbow upper khakhi sleeves + forearms cleanly from shoulders to wrists
+      _armStart.copy(leftShoulderAnchor);
+      _armEnd.set(leftHandCurr.x, leftHandCurr.y - 0.01, leftHandCurr.z - 0.05);
+      _armMid.lerpVectors(_armStart, _armEnd, 0.46);
+      _armMid.y -= 0.12;
+      _armMid.x += 0.05;
+      orientCylinderSegment(leftUpperSleeve, _armStart, _armMid, 0.34);
+      orientCylinderSegment(leftForearm, _armMid, _armEnd, 0.32);
+
+      _armStart.copy(rightShoulderAnchor);
+      _armEnd.set(rightHandCurr.x, rightHandCurr.y - 0.01, rightHandCurr.z - 0.05);
+      _armMid.lerpVectors(_armStart, _armEnd, 0.46);
+      _armMid.y -= 0.12;
+      _armMid.x -= 0.05;
+      orientCylinderSegment(rightUpperSleeve, _armStart, _armMid, 0.34);
+      orientCylinderSegment(rightForearm, _armMid, _armEnd, 0.32);
+
+      // 2. Animated 3D Conductor Waypoint Navigation & Gestures
+      let tx = 0.42;
+      let ty = 0.56;
+      let tz = 4.02;
+      let tRotY = -0.15;
+      let targetSeated = 1;
+      let moveSpeed = 3.2;
+
+      if (conductorMode === 'seated') {
+        targetSeated = 0;
+        if (condState.z < 3.6 && condState.x > 1.4) {
+          // Returning from rear reverse-guide spot -> walk forward along left exterior to door
+          tx = 1.98;
+          ty = 0.0;
+          tz = 4.18;
+          tRotY = 0;
+          moveSpeed = 5.4;
+        } else if (condState.x > 1.28) {
+          // Step in through the front doorway
+          tx = 0.96;
+          ty = 0.52;
+          tz = 4.12;
+          tRotY = -Math.PI * 0.5;
+          moveSpeed = 3.8;
+        } else {
+          // Settle into conductor seat beside the driver
+          tx = 0.42;
+          ty = 0.56;
+          tz = 4.02;
+          tRotY = -0.15;
+          targetSeated = 1;
+          moveSpeed = 3.2;
+        }
+      } else if (conductorMode === 'calling_stop') {
+        targetSeated = 0;
+        if (condState.x < 1.35) {
+          // Step down the front entry steps onto the road
+          tx = 1.88;
+          ty = 0.0;
+          tz = 4.18;
+          tRotY = Math.PI * 0.5;
+          moveSpeed = 3.8;
+        } else {
+          // Stand outside doorway facing roadside passengers & call out "Ajao bhai ajao!"
+          tx = 2.18;
+          ty = 0.0;
+          tz = 4.35;
+          tRotY = Math.PI * 0.48;
+          moveSpeed = 3.2;
+        }
+      } else {
+        // guiding_reverse: hop out of doorway and walk briskly behind left-rear corner to whistle-guide reverse!
+        targetSeated = 0;
+        if (condState.x < 1.55) {
+          tx = 1.98;
+          ty = 0.0;
+          tz = 4.18;
+          tRotY = Math.PI * 0.5;
+          moveSpeed = 4.8;
+        } else if (condState.z > -5.55) {
+          tx = 2.02;
+          ty = 0.0;
+          tz = -6.15;
+          tRotY = Math.PI;
+          moveSpeed = 6.2;
+        } else {
+          // Stand behind rear-left corner facing the bus rear bumper, blowing whistle & waving driver back!
+          tx = 1.96;
+          ty = 0.0;
+          tz = -6.28;
+          tRotY = -0.38;
+          moveSpeed = 3.6;
+        }
+      }
+
+      const dx = tx - condState.x;
+      const dy = ty - condState.y;
+      const dz = tz - condState.z;
+      const distToTarget = Math.hypot(dx, dy, dz);
+      const step = Math.min(distToTarget, moveSpeed * dt);
+      if (distToTarget > 0.01) {
+        condState.x += (dx / distToTarget) * step;
+        condState.y += (dy / distToTarget) * step;
+        condState.z += (dz / distToTarget) * step;
+      }
+
+      // Smooth shortest-angle yaw interpolation
+      let dRot = tRotY - condState.rotY;
+      while (dRot > Math.PI) dRot -= Math.PI * 2;
+      while (dRot < -Math.PI) dRot += Math.PI * 2;
+      condState.rotY += dRot * Math.min(1, dt * 8.5);
+
+      const isWalking = distToTarget > 0.14 && condState.seatedBlend < 0.35;
+      condState.seatedBlend = THREE.MathUtils.damp(
+        condState.seatedBlend,
+        targetSeated === 1 && distToTarget < 0.25 ? 1 : 0,
+        8.0,
+        dt
+      );
+
+      if (isWalking) {
+        condState.walkPhase += dt * (conductorMode === 'guiding_reverse' ? 11.5 : 8.5);
+      }
+
+      conductorGroup.position.set(
+        condState.x,
+        condState.y + (isWalking ? Math.abs(Math.sin(condState.walkPhase)) * 0.05 : 0),
+        condState.z
+      );
+      conductorGroup.rotation.y = condState.rotY;
+
+      // Apply Limb Poses: Seated vs Walking vs Calling Stop vs Guiding Reverse with Whistle!
+      const sb = condState.seatedBlend;
+      const walkSwing = isWalking ? Math.sin(condState.walkPhase) * 0.62 : 0;
+
+      condLeftLeg.hip.rotation.x = THREE.MathUtils.lerp(walkSwing, -1.48, sb);
+      condRightLeg.hip.rotation.x = THREE.MathUtils.lerp(-walkSwing, -1.48, sb);
+      condLeftLeg.knee.rotation.x = THREE.MathUtils.lerp(Math.max(0, -walkSwing * 0.7), 1.48, sb);
+      condRightLeg.knee.rotation.x = THREE.MathUtils.lerp(Math.max(0, walkSwing * 0.7), 1.48, sb);
+
+      const conductorReadyOutside =
+        (conductorMode === 'calling_stop' && condState.x > 1.75 && distToTarget < 0.35) ||
+        (conductorMode === 'guiding_reverse' && condState.z < -5.3 && distToTarget < 0.55);
+
+      if (sb > 0.6) {
+        // Relaxed seated pose next to driver
+        condLeftArm.sh.rotation.set(-0.35, 0, 0.12);
+        condLeftArm.elbow.rotation.set(-0.65, 0, 0);
+        condRightArm.sh.rotation.set(-0.32, 0, -0.14);
+        condRightArm.elbow.rotation.set(-0.6, 0, 0);
+        condHead.rotation.y = Math.sin(elapsed * 0.7) * 0.22;
+        condHead.rotation.x = 0.04;
+      } else if (isWalking) {
+        condLeftArm.sh.rotation.set(-walkSwing * 0.7, 0, 0.12);
+        condLeftArm.elbow.rotation.set(-0.35, 0, 0);
+        condRightArm.sh.rotation.set(walkSwing * 0.7, 0, -0.12);
+        condRightArm.elbow.rotation.set(-0.35, 0, 0);
+        condHead.rotation.set(0, 0, 0);
+      } else if (conductorMode === 'calling_stop') {
+        // Enthusiastically waving right arm to beckon passengers ("Ajao bhai ajao!")
+        condRightArm.sh.rotation.set(-2.35 + Math.sin(elapsed * 6.5) * 0.38, 0, -0.35);
+        condRightArm.elbow.rotation.set(-0.45 + Math.sin(elapsed * 6.5) * 0.25, 0, 0);
+        condLeftArm.sh.rotation.set(-0.45, 0, 0.16);
+        condLeftArm.elbow.rotation.set(-0.75, 0, 0);
+        condHead.rotation.y = Math.sin(elapsed * 2.4) * 0.35;
+        condHead.rotation.x = -0.06;
+      } else {
+        // Guiding Reverse: Left hand holds silver pea-whistle up to mouth; right arm waves "Aane do, aane do!"
+        condLeftArm.sh.rotation.set(-1.35, 0.25, -0.45);
+        condLeftArm.elbow.rotation.set(-1.55, 0, -0.2);
+        const guideWaveSpeed = Math.abs(speedMs) > 0.3 || gear === -1 ? 8.2 : 4.2;
+        condRightArm.sh.rotation.set(-1.85 + Math.sin(elapsed * guideWaveSpeed) * 0.55, 0, -0.32);
+        condRightArm.elbow.rotation.set(-0.55 + Math.cos(elapsed * guideWaveSpeed) * 0.35, 0, 0);
+        condHead.rotation.y = Math.sin(elapsed * 2.0) * 0.15;
+        condHead.rotation.x = -0.08;
+      }
+
+      const crossingDoorway =
+        condState.x > 0.62 && condState.x < 1.82 && condState.z > 3.55 && condState.z < 4.75;
+      const conductorDoorNeed = crossingDoorway || (conductorMode === 'calling_stop' && condState.x < 1.95) ? 1 : 0;
+
+      return { conductorDoorNeed, conductorReadyOutside };
     },
     updateLights(headlights, braking, reversing, indicators, cabinOn, blinkOn) {
       const hlIntensity = headlights === 2 ? 14 : headlights === 1 ? 7.5 : 0;

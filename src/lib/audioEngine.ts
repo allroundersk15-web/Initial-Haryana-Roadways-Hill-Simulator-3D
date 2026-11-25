@@ -60,6 +60,7 @@ export class IndianBusAudioEngine {
   private started = false;
 
   private lastSpeechAtMs = 0;
+  private lastConductorSpeechAtMs = 0;
   private speechLineCursor: Record<CrowdChatterContext, number> = {
     bus_stop: 0,
     onboard: 0,
@@ -269,6 +270,47 @@ export class IndianBusAudioEngine {
     }
   }
 
+  /**
+   * Speaks a dynamic Hindi conductor announcement (e.g., "आ जाओ भाई आ जाओ! कालका से शिमला...")
+   * or reverse-guiding instruction ("आने दो ड्राइवर साहब, आने दो!").
+   */
+  public speakConductorHindi(
+    phrase: string,
+    minIntervalMs = 5800,
+    forceInterrupt = false
+  ): boolean {
+    if (this.muted || !this.started) return false;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return false;
+    const now = Date.now();
+    if (now - this.lastConductorSpeechAtMs < minIntervalMs) return false;
+    if (window.speechSynthesis.speaking) {
+      if (!forceInterrupt) return false;
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore cancel errors
+      }
+    }
+
+    try {
+      const utter = new SpeechSynthesisUtterance(phrase);
+      utter.lang = 'hi-IN';
+      const voice = this.pickHindiVoice();
+      if (voice) {
+        utter.voice = voice;
+      }
+      utter.volume = 0.78;
+      utter.rate = 1.02;
+      utter.pitch = 0.94;
+      this.lastConductorSpeechAtMs = now;
+      this.lastSpeechAtMs = now;
+      window.speechSynthesis.speak(utter);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   public updateEngine(rpm: number, throttle: number, active: boolean): void {
     if (
       !this.started ||
@@ -444,6 +486,93 @@ export class IndianBusAudioEngine {
     };
     playDing(0);
     playDing(0.17);
+  }
+
+  /**
+   * Authentic Indian Bus Conductor Pea-Whistle (सीटी) synthesizer for guiding reverse maneuvers.
+   * Uses high-frequency carrier + 36Hz pea-trill FM/AM warble + breath air hiss.
+   */
+  public playConductorWhistle(style: 'guide' | 'urgent' | 'double' = 'guide'): void {
+    this.init();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+
+    const blowBlast = (offsetSec: number, durationSec: number, baseFreq: number) => {
+      if (!this.ctx || !this.masterGain) return;
+      const start = this.ctx.currentTime + offsetSec;
+      const end = start + durationSec;
+
+      const carrier = this.ctx.createOscillator();
+      carrier.type = 'sine';
+      carrier.frequency.setValueAtTime(baseFreq * 0.94, start);
+      carrier.frequency.linearRampToValueAtTime(baseFreq, start + 0.035);
+      carrier.frequency.setValueAtTime(baseFreq, end - 0.04);
+      carrier.frequency.linearRampToValueAtTime(baseFreq * 0.92, end);
+
+      const overtone = this.ctx.createOscillator();
+      overtone.type = 'triangle';
+      overtone.frequency.setValueAtTime(baseFreq * 2.02, start);
+
+      // Classic pea-whistle warble LFO (~36 Hz FM modulation)
+      const peaLfo = this.ctx.createOscillator();
+      peaLfo.type = 'sine';
+      peaLfo.frequency.setValueAtTime(style === 'urgent' ? 42 : 35, start);
+
+      const peaDepth = this.ctx.createGain();
+      peaDepth.gain.setValueAtTime(115, start);
+      peaLfo.connect(peaDepth);
+      peaDepth.connect(carrier.frequency);
+
+      const envGain = this.ctx.createGain();
+      envGain.gain.setValueAtTime(0.001, start);
+      envGain.gain.linearRampToValueAtTime(0.24, start + 0.025);
+      envGain.gain.setValueAtTime(0.22, Math.max(start + 0.03, end - 0.045));
+      envGain.gain.exponentialRampToValueAtTime(0.001, end);
+
+      const overGain = this.ctx.createGain();
+      overGain.gain.value = 0.08;
+
+      // Soft airy whistle breath hiss
+      const breathLen = Math.max(128, Math.floor(this.ctx.sampleRate * durationSec));
+      const breathBuf = this.ctx.createBuffer(1, breathLen, this.ctx.sampleRate);
+      const bData = breathBuf.getChannelData(0);
+      for (let i = 0; i < breathLen; i++) {
+        bData[i] = (Math.random() * 2 - 1) * 0.35;
+      }
+      const breathSrc = this.ctx.createBufferSource();
+      breathSrc.buffer = breathBuf;
+      const breathFilter = this.ctx.createBiquadFilter();
+      breathFilter.type = 'bandpass';
+      breathFilter.frequency.setValueAtTime(baseFreq, start);
+      breathFilter.Q.value = 4.5;
+
+      carrier.connect(envGain);
+      overtone.connect(overGain);
+      overGain.connect(envGain);
+      breathSrc.connect(breathFilter);
+      breathFilter.connect(envGain);
+      envGain.connect(this.masterGain);
+
+      carrier.start(start);
+      overtone.start(start);
+      peaLfo.start(start);
+      breathSrc.start(start);
+
+      carrier.stop(end + 0.02);
+      overtone.stop(end + 0.02);
+      peaLfo.stop(end + 0.02);
+      breathSrc.stop(end + 0.02);
+    };
+
+    if (style === 'urgent') {
+      blowBlast(0, 0.16, 3020);
+      blowBlast(0.21, 0.16, 3080);
+      blowBlast(0.42, 0.22, 3140);
+    } else if (style === 'double') {
+      blowBlast(0, 0.22, 2860);
+      blowBlast(0.28, 0.28, 2940);
+    } else {
+      blowBlast(0, 0.44, 2820);
+    }
   }
 
   public playIndicatorClick(): void {

@@ -17,7 +17,7 @@ import type {
   TransmissionMode,
   WeatherPreset,
 } from '../types/simulator';
-import { buildHaryanaRoadwaysBus, type BusVisualRig } from './busBuilder';
+import { buildHaryanaRoadwaysBus, type BusVisualRig, type ConductorMode } from './busBuilder';
 import { buildEndlessMountainWorld, type EndlessWorldHandle } from './endlessWorldBuilder';
 import { createSkyGradientDome, type LandslideZoneData } from './sceneryAndTraffic';
 import { buildTrainingGroundArena, type TrainingArenaHandle } from './trainingBuilder';
@@ -111,6 +111,36 @@ const GEAR_MAX_SPEED_MS: Record<number, number> = {
   5: 26.8,
   6: 31.5,
 };
+
+const STOP_HINDI_SHORT: Record<string, string> = {
+  'panchkula-kalka': 'कालका',
+  'dharampur-dhaba': 'धरमपुर',
+  'barog-solan-market': 'सोलन',
+  'tara-devi-mandir': 'तारा देवी',
+  'shimla-kufri': 'शिमला कुफरी',
+  'ambala-chd': 'अंबाला चंडीगढ़',
+  'swarghat-dhaba': 'स्वारघाट',
+  'mandi-market': 'मंडी',
+  'hanogi-mandir-aut': 'हनोगी औट',
+  'kullu-manali': 'कुल्लू मनाली',
+  'ambala-una': 'अंबाला ऊना',
+  'dehra-dhaba': 'देहरा',
+  'jwalaji-mandir': 'ज्वाला जी',
+  'kangra-market': 'कांगड़ा धर्मशाला',
+  'mcleod-ganj': 'मैक्लोडगंज',
+  'yamunanagar-paonta': 'यमुनानगर पांवटा',
+  'narkanda-dhaba': 'नारकंडा',
+  'rampur-market': 'रामपुर बुशहर',
+  'jeori-mandir': 'ज्यूरी',
+  'reckong-peo': 'रिकांग पिओ',
+};
+
+const REVERSE_HINDI_CUES = [
+  'आने दो ड्राइवर साहब, आने दो! पीछे रास्ता खाली है!',
+  'धीरे धीरे आने दो, सीधा पीछे लो!',
+  'आने दो, आने दो, थोड़ा और पीछे!',
+  'बढ़िया, आराम से पीछे लेते रहो!',
+];
 
 const WEATHER_SKY: Record<
   WeatherPreset,
@@ -259,6 +289,12 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
     nearLandslideLabel: null as string | null,
     landslideClearing: false,
     landslideClearPct: 0,
+    conductorDoorAnim: 0,
+    conductorCallStep: 0,
+    conductorWhistleTimer: 0,
+    conductorReverseCueIdx: 0,
+    conductorSpokeThisStop: false,
+    lastConductorMode: 'seated' as ConductorMode,
     needsWorldRebuild: true,
   });
 
@@ -694,6 +730,11 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
       s.nearLandslideLabel = null;
       s.landslideClearing = false;
       s.landslideClearPct = 0;
+      s.conductorDoorAnim = 0;
+      s.conductorCallStep = 0;
+      s.conductorWhistleTimer = 0;
+      s.conductorSpokeThisStop = false;
+      s.lastConductorMode = 'seated';
 
       if (curMode === 'training') {
         const track = getTrackById(curTrackId);
@@ -1020,6 +1061,7 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
           s.orbitAngle += dt * 0.22;
         }
         bus.setDoorOpenAmount(0.18 + Math.sin(elapsed * 0.6) * 0.12);
+        bus.updateDriverAndConductor(dt, elapsed, Math.sin(elapsed * 0.45) * 0.1, 0, 1, 'seated', false);
         bus.updateLights(1, false, false, 'off', true, blinkOn);
         bus.updateWipers(elapsed, false);
         audio.updateEngine(760, 0, false);
@@ -1316,9 +1358,8 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.rpm = THREE.MathUtils.damp(s.rpm, 740, 6, dt);
       }
 
-      // Animate 3D Bus Cockpit Controls & Exterior
+      // Animate 3D Bus Cockpit Controls, Driver Hands & Exterior
       s.doorAnim = THREE.MathUtils.damp(s.doorAnim, s.doorOpen ? 1 : 0, 6.5, dt);
-      bus.setDoorOpenAmount(s.doorAnim);
       bus.setSteeringAngle(s.steerAngle);
       bus.setGearStick(s.gear);
       bus.updateWipers(elapsed, s.wipersOn);
@@ -1555,6 +1596,113 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         s.landslideClearPct = 0;
       }
 
+      // Update 3D Driver Hands (single/two-hand random steering) & Conductor (seated / calling stop / reverse whistle!)
+      const isReversingNow = s.gear === -1 || s.speedMs < -0.25;
+      const isStoppedAtBusStop =
+        (curMode === 'career' && s.activeStopIdx >= 0 && Math.abs(s.speedMs) < 1.15 && !s.tripCompleted) ||
+        (curMode === 'endless' && s.doorOpen && Math.abs(s.speedMs) < 0.9);
+      const conductorMode: ConductorMode = isReversingNow
+        ? 'guiding_reverse'
+        : isStoppedAtBusStop
+          ? 'calling_stop'
+          : 'seated';
+
+      const { conductorDoorNeed, conductorReadyOutside } = bus.updateDriverAndConductor(
+        dt,
+        elapsed,
+        s.steerAngle,
+        s.speedMs,
+        s.gear,
+        conductorMode,
+        s.shiftCutTimer > 0
+      );
+      s.conductorDoorAnim = THREE.MathUtils.damp(s.conductorDoorAnim, conductorDoorNeed, 7.5, dt);
+      bus.setDoorOpenAmount(Math.max(s.doorAnim, s.conductorDoorAnim));
+
+      // Conductor Audio & Hindi Callouts when stepping out at Bus Stops or Guiding Reverse with Whistle
+      if (conductorMode === 'calling_stop' && conductorReadyOutside) {
+        let way1 = 'कालका';
+        let way2 = 'शिमला';
+        let isTerminalStop = false;
+
+        if (curMode === 'career' && s.activeStopIdx >= 0) {
+          const curSt = curRoute.stops[s.activeStopIdx];
+          const destSt = curRoute.stops[curRoute.stops.length - 1];
+          isTerminalStop = s.activeStopIdx === curRoute.stops.length - 1;
+          way1 = STOP_HINDI_SHORT[curSt.id] ?? curSt.hindiName;
+          way2 = STOP_HINDI_SHORT[destSt.id] ?? destSt.hindiName;
+        } else if (curMode === 'endless') {
+          if (s.endlessBiome === 'plains') {
+            way1 = 'अंबाला';
+            way2 = 'चंडीगढ़';
+          } else if (s.endlessBiome === 'foothills') {
+            way1 = 'कालका';
+            way2 = 'सोलन';
+          } else {
+            way1 = 'शिमला';
+            way2 = 'मनाली';
+          }
+        }
+
+        const stopPhrases = isTerminalStop
+          ? [
+              `आ गया ${way2} भाई! सब यात्री अपना सामान लेकर आराम से उतर जाओ!`,
+              `${way2} बस अड्डा आ गया, आराम से उतरो भाई साहब!`,
+            ]
+          : [
+              `आ जाओ भाई आ जाओ! ${way1} से ${way2}, ${way1} से ${way2}! जल्दी चढ़ो!`,
+              `आ जाओ भाई आ जाओ, ${way1} से सीधा ${way2} जाएगी! सीट खाली है भाई साहब!`,
+              `चलो भाई चलो! ${way1} से ${way2} वाली बस तैयार है, जल्दी बैठो!`,
+            ];
+        const phrase = stopPhrases[s.conductorCallStep % stopPhrases.length];
+        const firstCallout = !s.conductorSpokeThisStop;
+        const spoke = audio.speakConductorHindi(
+          phrase,
+          firstCallout ? 500 : 6800,
+          firstCallout
+        );
+        if (spoke) {
+          s.conductorSpokeThisStop = true;
+          s.conductorCallStep++;
+          if (!isTerminalStop && s.noticeTimer <= 0.2) {
+            showNotice(`Conductor: "आ जाओ भाई आ जाओ! ${way1} से ${way2}!"`, 'info', 2.8);
+          }
+        }
+      } else if (conductorMode === 'guiding_reverse') {
+        s.conductorSpokeThisStop = false;
+        s.conductorWhistleTimer -= dt;
+        const activelyBacking = s.speedMs < -0.25;
+        if (conductorReadyOutside && s.conductorWhistleTimer <= 0) {
+          const whistleStyle =
+            Math.abs(s.speedMs) > 3.1
+              ? 'urgent'
+              : Math.abs(s.steerAngle) > 0.26
+                ? 'double'
+                : 'guide';
+          audio.playConductorWhistle(whistleStyle);
+          s.conductorWhistleTimer = activelyBacking
+            ? whistleStyle === 'urgent'
+              ? 0.85
+              : 1.15
+            : 2.35;
+
+          const cue = REVERSE_HINDI_CUES[s.conductorReverseCueIdx % REVERSE_HINDI_CUES.length];
+          if (audio.speakConductorHindi(cue, 5600, false)) {
+            s.conductorReverseCueIdx++;
+          }
+        } else if (s.lastConductorMode !== 'guiding_reverse') {
+          audio.playConductorWhistle('double');
+          s.conductorWhistleTimer = 1.0;
+          if (s.noticeTimer <= 0.2) {
+            showNotice('Conductor guiding reverse outside with whistle (सीटी)!', 'info', 2.6);
+          }
+        }
+      } else {
+        s.conductorSpokeThisStop = false;
+        s.conductorWhistleTimer = 0;
+      }
+      s.lastConductorMode = conductorMode;
+
       // Commit final post-collision Bus Transform
       bus.root.position.set(s.busX, s.busY, s.busZ);
       bus.root.rotation.set(0, s.busHeading, 0);
@@ -1584,10 +1732,12 @@ export const BusSimulatorCanvas: React.FC<BusSimulatorCanvasProps> = ({
         if (nearStopCrowd) crowdIntensity = Math.min(1, crowdIntensity + 0.48);
         audio.updateCrowdAmbience(crowdIntensity, elapsed);
 
-        if (nearStopCrowd || (s.activeStopIdx >= 0 && s.doorOpen)) {
-          audio.triggerHindiCrowdVoice('bus_stop', 9500);
-        } else if (s.passengersOnBoard >= 6) {
-          audio.triggerHindiCrowdVoice('onboard', 22000);
+        if (conductorMode === 'seated') {
+          if (nearStopCrowd || (s.activeStopIdx >= 0 && s.doorOpen)) {
+            audio.triggerHindiCrowdVoice('bus_stop', 9500);
+          } else if (s.passengersOnBoard >= 6) {
+            audio.triggerHindiCrowdVoice('onboard', 22000);
+          }
         }
       } else {
         audio.updateCrowdAmbience(0, elapsed);
