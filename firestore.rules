@@ -1,0 +1,287 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Default-Deny Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidDepot(depot) {
+      return depot is string && depot in ['Panchkula', 'Ambala', 'Chandigarh', 'Yamunanagar', 'Kalka', 'Rohtak'];
+    }
+
+    function isValidTrackId(trackId) {
+      return trackId is string && trackId in ['figure8', 'hBayReverse', 'zigZag', 'gradientRamp'];
+    }
+
+    function isValidRouteId(routeId) {
+      return routeId is string && routeId in [
+        'kalka-shimla',
+        'ambala-manali',
+        'ambala-dharamshala',
+        'yamunanagar-reckong-peo'
+      ];
+    }
+
+    function isValidWeather(weather) {
+      return weather is string && weather in ['sunny', 'mist', 'rain', 'night'];
+    }
+
+    // Entity Validation Blueprint: DriverProfile
+    function isValidDriverProfile(data, driverId) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'depotHome',
+        'totalEarningsInr',
+        'totalKmDriven',
+        'totalPassengersCarried',
+        'htvLicenseEarned',
+        'preferredTransmission',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'depotHome',
+        'totalEarningsInr',
+        'totalKmDriven',
+        'totalPassengersCarried',
+        'htvLicenseEarned',
+        'preferredTransmission',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.uid is string
+      && data.uid == request.auth.uid
+      && data.uid == driverId
+      && isValidId(data.uid)
+      && data.displayName is string
+      && data.displayName.size() >= 1
+      && data.displayName.size() <= 80
+      && isValidDepot(data.depotHome)
+      && data.totalEarningsInr is number
+      && data.totalEarningsInr >= 0
+      && data.totalEarningsInr <= 100000000
+      && data.totalKmDriven is number
+      && data.totalKmDriven >= 0
+      && data.totalKmDriven <= 10000000
+      && data.totalPassengersCarried is number
+      && data.totalPassengersCarried >= 0
+      && data.totalPassengersCarried <= 10000000
+      && data.htvLicenseEarned is bool
+      && data.preferredTransmission is string
+      && data.preferredTransmission in ['auto', 'manual']
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    // Entity Validation Blueprint: LicenseTestRecord
+    function isValidLicenseTest(data, driverId, testId) {
+      return data.keys().hasAll([
+        'driverId',
+        'trackId',
+        'passed',
+        'bestScore',
+        'bestTimeSec',
+        'penalties',
+        'completedAt'
+      ])
+      && data.keys().hasOnly([
+        'driverId',
+        'trackId',
+        'passed',
+        'bestScore',
+        'bestTimeSec',
+        'penalties',
+        'completedAt'
+      ])
+      && data.driverId is string
+      && data.driverId == request.auth.uid
+      && data.driverId == driverId
+      && isValidId(data.driverId)
+      && isValidTrackId(data.trackId)
+      && data.trackId == testId
+      && data.passed is bool
+      && data.bestScore is number
+      && data.bestScore >= 0
+      && data.bestScore <= 100
+      && data.bestTimeSec is number
+      && data.bestTimeSec >= 1
+      && data.bestTimeSec <= 3600
+      && data.penalties is number
+      && data.penalties >= 0
+      && data.penalties <= 100
+      && data.completedAt is timestamp;
+    }
+
+    // Entity Validation Blueprint: TripLog
+    function isValidTripLog(data, driverId) {
+      return data.keys().hasAll([
+        'driverId',
+        'routeId',
+        'routeTitle',
+        'origin',
+        'destination',
+        'passengersBoarded',
+        'fareCollectedInr',
+        'safetyRating',
+        'weather',
+        'durationSec',
+        'completedAt'
+      ])
+      && data.keys().hasOnly([
+        'driverId',
+        'routeId',
+        'routeTitle',
+        'origin',
+        'destination',
+        'passengersBoarded',
+        'fareCollectedInr',
+        'safetyRating',
+        'weather',
+        'durationSec',
+        'completedAt'
+      ])
+      && data.driverId is string
+      && data.driverId == request.auth.uid
+      && data.driverId == driverId
+      && isValidId(data.driverId)
+      && isValidRouteId(data.routeId)
+      && data.routeTitle is string
+      && data.routeTitle.size() >= 3
+      && data.routeTitle.size() <= 100
+      && data.origin is string
+      && data.origin.size() >= 2
+      && data.origin.size() <= 60
+      && data.destination is string
+      && data.destination.size() >= 2
+      && data.destination.size() <= 60
+      && data.passengersBoarded is number
+      && data.passengersBoarded >= 0
+      && data.passengersBoarded <= 300
+      && data.fareCollectedInr is number
+      && data.fareCollectedInr >= 0
+      && data.fareCollectedInr <= 100000
+      && data.safetyRating is number
+      && data.safetyRating >= 0
+      && data.safetyRating <= 5
+      && isValidWeather(data.weather)
+      && data.durationSec is number
+      && data.durationSec >= 1
+      && data.durationSec <= 86400
+      && data.completedAt is timestamp;
+    }
+
+    // Collection: /drivers/{driverId}
+    match /drivers/{driverId} {
+      allow get: if isOwner(driverId) && isValidId(driverId);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isOwner(driverId)
+        && isValidId(driverId)
+        && isValidDriverProfile(incoming(), driverId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isOwner(driverId)
+        && isValidId(driverId)
+        && isValidDriverProfile(incoming(), driverId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Update driver settings (name, depot, gearbox preference)
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'depotHome', 'preferredTransmission', 'updatedAt'])
+          // Action 2: Record career progress & HTV license badge
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'totalEarningsInr',
+            'totalKmDriven',
+            'totalPassengersCarried',
+            'htvLicenseEarned',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if false;
+
+      // Subcollection: /drivers/{driverId}/licenseTests/{testId}
+      match /licenseTests/{testId} {
+        allow get: if isOwner(driverId) && isValidId(driverId) && isValidTrackId(testId);
+        allow list: if isOwner(driverId) && isValidId(driverId) && resource.data.driverId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isOwner(driverId)
+          && isValidId(driverId)
+          && isValidTrackId(testId)
+          && isValidLicenseTest(incoming(), driverId, testId)
+          && incoming().completedAt == request.time
+          && exists(/databases/$(database)/documents/drivers/$(driverId));
+
+        allow update: if isVerifiedUser()
+          && isOwner(driverId)
+          && isValidId(driverId)
+          && isValidTrackId(testId)
+          && isValidLicenseTest(incoming(), driverId, testId)
+          && incoming().driverId == existing().driverId
+          && incoming().trackId == existing().trackId
+          && incoming().completedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'passed',
+            'bestScore',
+            'bestTimeSec',
+            'penalties',
+            'completedAt'
+          ])
+          && exists(/databases/$(database)/documents/drivers/$(driverId));
+
+        allow delete: if false;
+      }
+
+      // Subcollection: /drivers/{driverId}/tripLogs/{tripId}
+      match /tripLogs/{tripId} {
+        allow get: if isOwner(driverId) && isValidId(driverId) && isValidId(tripId);
+        allow list: if isOwner(driverId) && isValidId(driverId) && resource.data.driverId == request.auth.uid;
+
+        allow create: if isVerifiedUser()
+          && isOwner(driverId)
+          && isValidId(driverId)
+          && isValidId(tripId)
+          && isValidTripLog(incoming(), driverId)
+          && incoming().completedAt == request.time
+          && exists(/databases/$(database)/documents/drivers/$(driverId));
+
+        allow update: if false;
+        allow delete: if isVerifiedUser() && isOwner(driverId) && isValidId(driverId) && isValidId(tripId);
+      }
+    }
+  }
+}

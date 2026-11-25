@@ -1,0 +1,8 @@
+{
+  "name": "Haryana Roadways Hill Simulator 3D",
+  "description": "Realistic 3D Haryana Roadways bus driving simulator across Himachal Pradesh mountain highways with HSSC HTV license tracks, live Google Maps routes, Indian air horns, passenger boarding, landmarks, and cloud career sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
